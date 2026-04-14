@@ -1,0 +1,36 @@
+[project]
+name = "mdx-cli"
+version = "1.0.0"
+requires-python = ">=3.13"
+dependencies = [
+    "typer[all]>=0.12",
+    "httpx>=0.27",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "keyring>=25.0",
+    "cryptography>=42.0",
+    "beautifulsoup4>=4.12",
+    "questionary>=2.0",
+]
+
+[project.scripts]
+mdx = "mdx_cli.main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mdx_cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.14",
+    "respx>=0.22",
+    "pyinstaller>=6.0",
+]
