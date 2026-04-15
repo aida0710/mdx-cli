@@ -9,11 +9,11 @@ from mdx_cli.models.vm import VM
 runner = CliRunner()
 
 
-def _make_vm(name="test-vm", uuid="00000000-0000-0000-0000-000000000001"):
+def _make_vm(name="test-vm", uuid="00000000-0000-0000-0000-000000000001", status="PowerON"):
     return VM(
         uuid=uuid,
         name=name,
-        status="PowerON",
+        status=status,
         service_level="スポット仮想マシン",
     )
 
@@ -75,10 +75,10 @@ def test_vm_start_pattern():
 
 
 def test_vm_destroy_single():
-    """UUID指定で1台削除"""
+    """UUID指定で1台削除（停止済み）"""
     from mdx_cli.models.vm import VMDeployResponse
 
-    vm = _make_vm()
+    vm = _make_vm(status="PowerOFF")
     task_resp = VMDeployResponse(task_id=["task-destroy-1"])
     with patch("mdx_cli.commands.vm._resolve_vms", return_value=[vm]):
         with patch("mdx_cli.commands.vm.destroy_vm", return_value=task_resp) as mock_destroy:
