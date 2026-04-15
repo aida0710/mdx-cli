@@ -32,7 +32,7 @@ mdx vm ssh my-vm-01
 ```
 mdx auth          認証管理
 mdx project       プロジェクト管理
-mdx vm            仮想マシン管理
+mdx vm            仮想マシン管理（list/show/deploy/start/stop/shutdown/reboot/reset/destroy/reconfigure/ssh/csv/sync）
 mdx network       ネットワーク管理
   mdx network segment  セグメント管理
   mdx network acl      ACL管理
@@ -138,17 +138,47 @@ mdx vm ssh my-vm-01 -g                 # グローバルIPで接続
 - SSHユーザー名はテンプレートの `login_username` から自動検出（`mdxuser`, `mdx-user01` 等）
 - デフォルトはプライベートIP、`-g` でグローバルIPを使用
 
-### デプロイ（対話式）
+### デプロイ
+
+対話式とワンライナーの両方に対応。引数を指定した分はスキップ、未指定分だけ対話で聞きます。
 
 ```bash
+# 全て対話式
 mdx vm deploy
+
+# 全引数指定（スクリプトから対話なし実行）
+mdx vm deploy \
+  -t "Ubuntu 22.04" \
+  -n "worker-{a-e}-{0-9}" \
+  --pack-type cpu \
+  --pack-num 3 \
+  --disk 40 \
+  --service-level spot \
+  -k ~/.ssh/id_ed25519.pub \
+  --power-on \
+  -y \
+  --no-wait
+
+# 一部だけ指定（残りは対話）
+mdx vm deploy -n my-vm --pack-num 10
 ```
 
-テンプレート・セグメント・SSH鍵・リソースを対話的に選択。全入力で矢印キーによるカーソル移動・編集が可能。
+| オプション | 説明 |
+|-----------|------|
+| `-t` / `--template` | テンプレート名（部分一致） |
+| `-n` / `--name` | VM名（パターン対応） |
+| `--pack-type` | `cpu` / `gpu` |
+| `--pack-num` | パック数 |
+| `--disk` | ディスクサイズ (GB) |
+| `--service-level` | `spot` / `guarantee` |
+| `-k` / `--key` | SSH公開鍵のパス |
+| `--power-on` | デプロイ後に自動起動 |
+| `-y` / `--yes` | 確認をスキップ |
+| `--no-wait` | タスク完了を待たない |
 
 #### バッチ作成
 
-VM 名にパターンを指定すると複数台を一括作成できます。
+VM 名にパターンを指定すると複数台を一括作成できます（10並列、リトライ付き）。
 
 | パターン | 展開結果 | 台数 |
 |---------|---------|------|
@@ -157,21 +187,39 @@ VM 名にパターンを指定すると複数台を一括作成できます。
 | `crawler-{a-g}-{0-9}` | crawler-a-0 ~ crawler-g-9 | 70 |
 | `node-{00-05}` | node-00 ~ node-05 | 6 |
 
-### 起動・停止・削除（パターン対応）
+### 起動・停止・削除（パターン対応、10並列）
+
+全操作でパターン指定による一括操作に対応。10並列・リトライ付き。
 
 ```bash
-# 単体操作
+# 起動
 mdx vm start web-server
-mdx vm stop web-server
-mdx vm destroy web-server
-
-# glob パターンで一括操作
-mdx vm stop "worker-*"
 mdx vm start "worker-*" -s spot
+
+# 正常シャットダウン
+mdx vm shutdown "worker-*"
+
+# 強制停止
+mdx vm stop "worker-*"
+
+# 再起動 / リセット
+mdx vm reboot "worker-*"
+mdx vm reset "worker-*"
+
+# 削除（稼働中VMは自動停止してから削除）
 mdx vm destroy "test-*"
 
 # 範囲パターン
 mdx vm stop "worker-{a-c}-*"
+```
+
+### 構成変更（対話式）
+
+VMのパック数・ディスクサイズを変更。稼働中VMは自動停止します。
+
+```bash
+mdx vm reconfigure my-vm     # 名前指定
+mdx vm reconfigure            # 一覧から選択
 ```
 
 複数台操作時は対象一覧を表示して確認を求めます。
