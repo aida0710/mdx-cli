@@ -930,7 +930,7 @@ def csv(
     settings = Settings()
     store = CredentialStore(config_dir=settings.config_dir)
     token = store.load_token() or ""
-    paths = [f"/api/vm/{v.uuid}/csv" for v in vms]
+    paths = [f"/api/vm/{v.uuid}/csv/" for v in vms]
     results = parallel_get(settings.base_url, token, paths, max_concurrent=50, on_progress=on_progress)
     status_display.stop()
 
