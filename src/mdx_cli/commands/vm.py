@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 import questionary
 from questionary import Choice
 import typer
@@ -22,6 +23,7 @@ from mdx_cli.api.endpoints.vms import (
     shutdown_vm,
     sync_vms,
 )
+from mdx_cli.api.parallel import parallel_post, parallel_wait
 from mdx_cli.api.spinner import stop_active_spinner
 from mdx_cli.commands._common import get_client, ask_or_abort, resolve_project_id
 from mdx_cli.credentials.store import CredentialStore
@@ -291,8 +293,8 @@ def deploy(
     if not questionary.confirm("\nデプロイしますか？").unsafe_ask():
         raise typer.Abort()
 
-    # --- デプロイ実行 ---
-    task_ids: list[str] = []
+    # --- デプロイ実行（並列） ---
+    deploy_reqs = []
     for name in vm_names:
         req = VMDeployRequest(
             catalog=selected_tmpl.uuid,
@@ -308,21 +310,40 @@ def deploy(
             os_type=selected_tmpl.os_type or "Linux",
             power_on=power_on,
         )
-        resp = deploy_vm(client, req)
-        tid = resp.task_id[0]
+        deploy_reqs.append({"path": "/api/vm/deploy/", "json": req.model_dump()})
+
+    token, base_url = _get_token_and_base()
+    from mdx_cli.api.spinner import _console as spin_console
+    from rich.status import Status
+    status_display = Status("", console=spin_console, spinner="dots")
+    status_display.start()
+    done_count = 0
+
+    def on_deploy_progress(idx: int) -> None:
+        nonlocal done_count
+        done_count += 1
+        status_display.update(f"デプロイ中... ({done_count}/{len(vm_names)})")
+
+    results = parallel_post(base_url, token, deploy_reqs, on_progress=on_deploy_progress)
+    status_display.stop()
+
+    task_ids: list[str] = []
+    for name, resp_data in zip(vm_names, results):
+        tid = resp_data.get("task_id", "")
+        if isinstance(tid, list):
+            tid = tid[0] if tid else ""
         task_ids.append(tid)
-        stop_active_spinner()
         console.print(f"  [green]✓[/green] {name} → タスク: {tid}")
 
     console.print(f"\n{len(task_ids)}台のデプロイを開始しました")
 
     if not no_wait:
-        settings = Settings()
-        for tid in task_ids:
-            task = wait_for_task(client, tid, poll_interval=settings.task_poll_interval, timeout=settings.task_poll_timeout)
-            stop_active_spinner()
-            status_style = "[green]" if task.status.value == "Completed" else "[red]"
-            console.print(f"  {status_style}{task.object_name}: {task.status.value}[/]")
+        task_results = _parallel_task_wait(task_ids)
+        for data in task_results:
+            name = data.get("object_name", "?")
+            status = data.get("status", "?")
+            style = "[green]" if status == "Completed" else "[red]"
+            console.print(f"  {style}{name}: {status}[/]")
 
 
 def _resolve_vms(client, pattern: str, project_id: str | None) -> list:
@@ -350,6 +371,68 @@ def _resolve_vms(client, pattern: str, project_id: str | None) -> list:
     return [v for v in all_vms if v.name in set(matched_names)]
 
 
+def _get_token_and_base() -> tuple[str, str]:
+    """並列API用にトークンとベースURLを取得する。"""
+    settings = Settings()
+    store = CredentialStore(config_dir=settings.config_dir)
+    return store.load_token() or "", settings.base_url
+
+
+def _parallel_vm_action(vms: list, action_path_fn, action_name: str, json_fn=None) -> list[dict]:
+    """VM一括操作を並列実行する。
+
+    action_path_fn: VM → APIパス (例: lambda v: f"/api/vm/{v.uuid}/power_on/")
+    json_fn: VM → POSTボディ (省略時は None)
+    """
+    from mdx_cli.api.spinner import _console as spin_console
+    from rich.status import Status
+
+    token, base_url = _get_token_and_base()
+    reqs = [{"path": action_path_fn(v), "json": json_fn(v) if json_fn else None} for v in vms]
+
+    status_display = Status("", console=spin_console, spinner="dots")
+    status_display.start()
+    done_count = 0
+
+    def on_progress(idx: int) -> None:
+        nonlocal done_count
+        done_count += 1
+        status_display.update(f"{action_name}... ({done_count}/{len(vms)})")
+
+    results = parallel_post(base_url, token, reqs, on_progress=on_progress)
+    status_display.stop()
+    return results
+
+
+def _parallel_task_wait(task_ids: list[str]) -> list[dict]:
+    """複数タスクを並列ポーリングで待機する。"""
+    from mdx_cli.api.spinner import _console as spin_console
+    from rich.status import Status
+
+    token, base_url = _get_token_and_base()
+    settings = Settings()
+
+    status_display = Status("", console=spin_console, spinner="dots")
+    status_display.start()
+    done_count = 0
+
+    def on_done(tid: str, data: dict) -> None:
+        nonlocal done_count
+        done_count += 1
+        name = data.get("object_name", tid[:8])
+        status = data.get("status", "?")
+        status_display.update(f"タスク完了待ち... ({done_count}/{len(task_ids)}) {name}: {status}")
+
+    results = parallel_wait(
+        base_url, token, task_ids,
+        poll_interval=settings.task_poll_interval,
+        timeout=settings.task_poll_timeout,
+        on_done=on_done,
+    )
+    status_display.stop()
+    return results
+
+
 @app.command()
 def start(
     target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
@@ -368,11 +451,14 @@ def start(
         if not questionary.confirm(f"\n{len(vms)}台を起動しますか？").unsafe_ask():
             raise typer.Abort()
 
+    _parallel_vm_action(
+        vms,
+        lambda v: f"/api/vm/{v.uuid}/power_on/",
+        "起動中",
+        json_fn=lambda v: {"service_level": service_level},
+    )
     for v in vms:
-        power_on_vm(client, v.uuid, service_level)
-        stop_active_spinner()
         console.print(f"  [green]✓[/green] {v.name}")
-
     console.print(f"\n{len(vms)}台の起動を実行しました")
 
 
@@ -393,11 +479,9 @@ def stop(
         if not questionary.confirm(f"\n{len(vms)}台を停止しますか？").unsafe_ask():
             raise typer.Abort()
 
+    _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/power_off/", "強制停止中")
     for v in vms:
-        power_off_vm(client, v.uuid)
-        stop_active_spinner()
         console.print(f"  [green]✓[/green] {v.name}")
-
     console.print(f"\n{len(vms)}台の強制停止を実行しました")
 
 
@@ -418,11 +502,9 @@ def shutdown(
         if not questionary.confirm(f"\n{len(vms)}台をシャットダウンしますか？").unsafe_ask():
             raise typer.Abort()
 
+    _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/shutdown/", "シャットダウン中")
     for v in vms:
-        shutdown_vm(client, v.uuid)
-        stop_active_spinner()
         console.print(f"  [green]✓[/green] {v.name}")
-
     console.print(f"\n{len(vms)}台のシャットダウンを実行しました")
 
 
@@ -443,11 +525,9 @@ def reboot(
         if not questionary.confirm(f"\n{len(vms)}台を再起動しますか？").unsafe_ask():
             raise typer.Abort()
 
+    _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/reboot/", "再起動中")
     for v in vms:
-        reboot_vm(client, v.uuid)
-        stop_active_spinner()
         console.print(f"  [green]✓[/green] {v.name}")
-
     console.print(f"\n{len(vms)}台の再起動を実行しました")
 
 
@@ -467,11 +547,9 @@ def reset(
     if not questionary.confirm(f"\n本当に{len(vms)}台をリセットしますか？", default=False).unsafe_ask():
         raise typer.Abort()
 
+    _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/reset/", "リセット中")
     for v in vms:
-        reset_vm(client, v.uuid)
-        stop_active_spinner()
         console.print(f"  [green]✓[/green] {v.name}")
-
     console.print(f"\n{len(vms)}台のリセットを実行しました")
 
 
@@ -653,44 +731,52 @@ def destroy(
     if not questionary.confirm(f"\n本当に{len(vms)}台を削除しますか？", default=False).unsafe_ask():
         raise typer.Abort()
 
-    # 稼働中VMを停止して完了を待つ
+    # 稼働中VMを並列停止して完了を待つ
     if running_vms:
-        import time
-        for v in running_vms:
-            power_off_vm(client, v.uuid)
-            stop_active_spinner()
-            console.print(f"  [yellow]停止中[/yellow] {v.name}", end="")
-        # 全VMがPowerOFF になるまで待機
-        pending = {v.uuid for v in running_vms}
-        for _ in range(60):
-            time.sleep(5)
-            for vid in list(pending):
-                vm_check = get_vm(client, vid)
-                stop_active_spinner()
-                if vm_check.status != "PowerON":
-                    pending.discard(vid)
-            if not pending:
-                break
+        _parallel_vm_action(running_vms, lambda v: f"/api/vm/{v.uuid}/power_off/", "停止中")
+        console.print(f"  {len(running_vms)}台の停止リクエスト送信完了")
+
+        # 全VMがPowerOFFになるまで並列ポーリング
+        import asyncio
+        token, base_url = _get_token_and_base()
+        settings = Settings()
+
+        async def _wait_poweroff():
+            resolved = base_url if base_url.endswith("/") else base_url + "/"
+            async with httpx.AsyncClient(base_url=resolved, timeout=settings.request_timeout, headers={"Authorization": f"JWT {token}"}) as ac:
+                async def _poll(vid):
+                    for _ in range(60):
+                        resp = await ac.get(f"/api/vm/{vid}/")
+                        if resp.json().get("status") != "PowerON":
+                            return
+                        await asyncio.sleep(5)
+                await asyncio.gather(*[_poll(v.uuid) for v in running_vms])
+
+        import httpx as httpx_mod
+        asyncio.run(_wait_poweroff())
         console.print(f"  → 停止完了")
         console.print("")
 
+    # 並列削除
+    destroy_results = _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/destroy/", "削除中")
+
     task_ids: list[str] = []
-    for v in vms:
-        resp = destroy_vm(client, v.uuid)
-        tid = resp.task_id[0]
+    for v, resp_data in zip(vms, destroy_results):
+        tid = resp_data.get("task_id", "")
+        if isinstance(tid, list):
+            tid = tid[0] if tid else ""
         task_ids.append(tid)
-        stop_active_spinner()
         console.print(f"  [green]✓[/green] {v.name} → タスク: {tid}")
 
     console.print(f"\n{len(task_ids)}台の削除を開始しました")
 
     if not no_wait:
-        settings = Settings()
-        for tid in task_ids:
-            task = wait_for_task(client, tid, poll_interval=settings.task_poll_interval, timeout=settings.task_poll_timeout)
-            stop_active_spinner()
-            status_style = "[green]" if task.status.value == "Completed" else "[red]"
-            console.print(f"  {status_style}{task.object_name}: {task.status.value}[/]")
+        task_results = _parallel_task_wait(task_ids)
+        for data in task_results:
+            name = data.get("object_name", "?")
+            status = data.get("status", "?")
+            style = "[green]" if status == "Completed" else "[red]"
+            console.print(f"  {style}{name}: {status}[/]")
 
 
 @app.command()
@@ -858,7 +944,7 @@ def csv(
     store = CredentialStore(config_dir=settings.config_dir)
     token = store.load_token() or ""
     paths = [f"/api/vm/{v.uuid}/csv" for v in vms]
-    results = parallel_get(settings.base_url, token, paths, max_concurrent=10, on_progress=on_progress)
+    results = parallel_get(settings.base_url, token, paths, max_concurrent=50, on_progress=on_progress)
     status_display.stop()
 
     rows = [_vm_csv_row(data) for data in results]

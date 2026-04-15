@@ -115,7 +115,7 @@ def check_ip(
     store = CredentialStore(config_dir=settings.config_dir)
     token = store.load_token() or ""
     paths = [f"/api/vm/{v.uuid}/" for v in active_vms]
-    results = parallel_get(settings.base_url, token, paths, max_concurrent=10, on_progress=on_progress)
+    results = parallel_get(settings.base_url, token, paths, max_concurrent=50, on_progress=on_progress)
     if status_display:
         status_display.stop()
 
