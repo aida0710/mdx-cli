@@ -71,6 +71,24 @@ def reset_vm(client: httpx.Client, vm_id: str) -> None:
     resp.raise_for_status()
 
 
+def reconfigure_vm(client: httpx.Client, vm_id: str, config: dict) -> str:
+    """VM構成変更。VMは停止状態である必要がある。
+
+    config例: {
+        "hard_disks": [{"disk_number": 1, "device_key": 2000, "capacity": 50}],
+        "network_adapters": [{"adapter_number": 1, "segment": "<uuid>"}],
+        "pack_num": 5,
+    }
+    """
+    resp = client.post(f"/api/vm/{vm_id}/reconfigure/", json=config)
+    resp.raise_for_status()
+    data = resp.json()
+    task_id = data.get("task_id", "")
+    if isinstance(task_id, list):
+        task_id = task_id[0]
+    return task_id
+
+
 def sync_vms(client: httpx.Client, project_id: str) -> None:
     resp = client.post(f"/api/vm/synchronize/project/{project_id}/")
     resp.raise_for_status()
