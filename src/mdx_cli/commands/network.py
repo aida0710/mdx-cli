@@ -16,8 +16,8 @@ from mdx_cli.settings import Settings
 from mdx_cli.commands.acl import app as acl_app
 from mdx_cli.commands.dnat import app as dnat_app
 
-app = typer.Typer(help="ネットワーク管理")
-segment_app = typer.Typer(help="セグメント管理")
+app = typer.Typer(no_args_is_help=True, help="ネットワーク管理")
+segment_app = typer.Typer(no_args_is_help=True, help="セグメント管理")
 app.add_typer(segment_app, name="segment")
 app.add_typer(acl_app, name="acl")
 app.add_typer(dnat_app, name="dnat")

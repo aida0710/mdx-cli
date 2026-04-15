@@ -16,7 +16,7 @@ from mdx_cli.output.formatting import console, render
 from mdx_cli.output.tables import ACL_COLUMNS
 from mdx_cli.settings import Settings
 
-app = typer.Typer(help="ACL管理")
+app = typer.Typer(no_args_is_help=True, help="ACL管理")
 
 
 

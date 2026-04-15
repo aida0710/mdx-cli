@@ -16,7 +16,7 @@ from mdx_cli.output.formatting import console, render
 from mdx_cli.output.tables import DNAT_COLUMNS
 from mdx_cli.settings import Settings
 
-app = typer.Typer(help="DNAT管理")
+app = typer.Typer(no_args_is_help=True, help="DNAT管理")
 
 
 
