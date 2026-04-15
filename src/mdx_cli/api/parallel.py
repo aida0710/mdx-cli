@@ -14,7 +14,7 @@ from mdx_cli.settings import Settings
 logger = logging.getLogger("mdx_cli")
 
 MAX_CONCURRENT_GET = 50
-MAX_CONCURRENT_POST = 10
+MAX_CONCURRENT_POST = 5
 MAX_RETRIES = 3
 RETRY_BACKOFF = [1, 2, 4]  # 秒
 
@@ -112,8 +112,11 @@ def parallel_post(
     requests: list[dict],
     max_concurrent: int = MAX_CONCURRENT_POST,
     on_progress: Callable[[int], None] | None = None,
-) -> list[dict]:
-    """複数のPOST APIを並列に実行する（リトライ付き）。"""
+) -> list[dict | Exception]:
+    """複数のPOST APIを並列に実行する（リトライ付き）。
+
+    失敗したリクエストはExceptionオブジェクトとして返る（全体は止まらない）。
+    """
     settings = Settings()
 
     async def _run():
@@ -123,7 +126,7 @@ def parallel_post(
                 _post_one(client, r["path"], r.get("json"), semaphore, i, on_progress)
                 for i, r in enumerate(requests)
             ]
-            return await asyncio.gather(*tasks)
+            return await asyncio.gather(*tasks, return_exceptions=True)
 
     return list(asyncio.run(_run()))
 

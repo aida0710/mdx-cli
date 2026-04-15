@@ -334,22 +334,38 @@ def deploy(
     status_display.stop()
 
     task_ids: list[str] = []
+    success_count = 0
+    fail_count = 0
+    failed_names: list[str] = []
     for name, resp_data in zip(vm_names, results):
+        if isinstance(resp_data, Exception):
+            fail_count += 1
+            failed_names.append(name)
+            console.print(f"  [red]✗[/red] {name} → エラー: {resp_data}")
+            continue
         tid = resp_data.get("task_id", "")
         if isinstance(tid, list):
             tid = tid[0] if tid else ""
-        task_ids.append(tid)
-        console.print(f"  [green]✓[/green] {name} → タスク: {tid}")
+        if tid:
+            task_ids.append(tid)
+            success_count += 1
+            console.print(f"  [green]✓[/green] {name} → タスク: {tid}")
+        else:
+            fail_count += 1
+            failed_names.append(name)
+            console.print(f"  [red]✗[/red] {name} → レスポンス異常: {resp_data}")
 
-    console.print(f"\n{len(task_ids)}台のデプロイを開始しました")
+    console.print(f"\n成功: {success_count}台  失敗: {fail_count}台")
+    if failed_names:
+        console.print(f"[red]失敗したVM: {', '.join(failed_names[:10])}{'...' if len(failed_names) > 10 else ''}[/red]")
 
-    if not no_wait:
+    if not no_wait and task_ids:
         task_results = _parallel_task_wait(task_ids)
         for data in task_results:
-            name = data.get("object_name", "?")
+            obj_name = data.get("object_name", "?")
             status = data.get("status", "?")
             style = "[green]" if status == "Completed" else "[red]"
-            console.print(f"  {style}{name}: {status}[/]")
+            console.print(f"  {style}{obj_name}: {status}[/]")
 
 
 def _resolve_vms(client, pattern: str, project_id: str | None) -> list:
