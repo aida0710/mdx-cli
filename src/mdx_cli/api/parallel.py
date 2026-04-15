@@ -1,16 +1,22 @@
 """並列APIユーティリティ
 
 httpx.AsyncClient + asyncio.Semaphore で同時実行数を制限しつつ並列実行。
-GET / POST / タスク待機に対応。
+GET / POST / タスク待機に対応。リトライ付き。
 """
 
 import asyncio
+import logging
 from typing import Callable
 
 import httpx
 from mdx_cli.settings import Settings
 
-MAX_CONCURRENT = 50
+logger = logging.getLogger("mdx_cli")
+
+MAX_CONCURRENT_GET = 50
+MAX_CONCURRENT_POST = 10
+MAX_RETRIES = 3
+RETRY_BACKOFF = [1, 2, 4]  # 秒
 
 
 def _make_async_client(base_url: str, token: str, timeout: int) -> httpx.AsyncClient:
@@ -32,18 +38,27 @@ async def _fetch_one(
     on_progress: Callable[[int], None] | None,
 ) -> dict:
     async with semaphore:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        if on_progress:
-            on_progress(index)
-        return resp.json()
+        for attempt in range(MAX_RETRIES):
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                if on_progress:
+                    on_progress(index)
+                return resp.json()
+            except (httpx.HTTPStatusError, httpx.ConnectError) as e:
+                if attempt < MAX_RETRIES - 1:
+                    wait = RETRY_BACKOFF[attempt]
+                    logger.debug("GET %s failed (%s), retry in %ds", url, e, wait)
+                    await asyncio.sleep(wait)
+                else:
+                    raise
 
 
 def parallel_get(
     base_url: str,
     token: str,
     paths: list[str],
-    max_concurrent: int = MAX_CONCURRENT,
+    max_concurrent: int = MAX_CONCURRENT_GET,
     on_progress: Callable[[int], None] | None = None,
 ) -> list[dict]:
     """複数のGET APIを並列に取得する。"""
@@ -72,28 +87,33 @@ async def _post_one(
     on_progress: Callable[[int], None] | None,
 ) -> dict:
     async with semaphore:
-        resp = await client.post(path, json=json_body)
-        resp.raise_for_status()
-        if on_progress:
-            on_progress(index)
-        try:
-            return resp.json()
-        except Exception:
-            return {}
+        for attempt in range(MAX_RETRIES):
+            try:
+                resp = await client.post(path, json=json_body)
+                resp.raise_for_status()
+                if on_progress:
+                    on_progress(index)
+                try:
+                    return resp.json()
+                except Exception:
+                    return {}
+            except (httpx.HTTPStatusError, httpx.ConnectError) as e:
+                if attempt < MAX_RETRIES - 1:
+                    wait = RETRY_BACKOFF[attempt]
+                    logger.debug("POST %s failed (%s), retry in %ds", path, e, wait)
+                    await asyncio.sleep(wait)
+                else:
+                    raise
 
 
 def parallel_post(
     base_url: str,
     token: str,
     requests: list[dict],
-    max_concurrent: int = MAX_CONCURRENT,
+    max_concurrent: int = MAX_CONCURRENT_POST,
     on_progress: Callable[[int], None] | None = None,
 ) -> list[dict]:
-    """複数のPOST APIを並列に実行する。
-
-    Args:
-        requests: [{"path": "/api/...", "json": {...}}, ...] のリスト
-    """
+    """複数のPOST APIを並列に実行する（リトライ付き）。"""
     settings = Settings()
 
     async def _run():
@@ -143,14 +163,10 @@ def parallel_wait(
     task_ids: list[str],
     poll_interval: int = 3,
     timeout: int = 600,
-    max_concurrent: int = MAX_CONCURRENT,
+    max_concurrent: int = MAX_CONCURRENT_POST,
     on_done: Callable[[str, dict], None] | None = None,
 ) -> list[dict]:
-    """複数タスクを並列でポーリングし全完了まで待機する。
-
-    Args:
-        on_done: 各タスク完了時に (task_id, task_data) で呼ばれるコールバック
-    """
+    """複数タスクを並列でポーリングし全完了まで待機する。"""
     settings = Settings()
 
     async def _run():
