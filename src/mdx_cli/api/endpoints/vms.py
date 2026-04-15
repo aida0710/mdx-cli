@@ -51,7 +51,7 @@ def destroy_vm(client: httpx.Client, vm_id: str) -> VMDeployResponse:
 
 def get_vm_csv(client: httpx.Client, vm_id: str) -> dict:
     """VM のネットワーク情報を CSV 用に取得する。"""
-    resp = client.get(f"/api/vm/{vm_id}/csv")
+    resp = client.get(f"/api/vm/{vm_id}/csv/")
     resp.raise_for_status()
     return resp.json()
 
