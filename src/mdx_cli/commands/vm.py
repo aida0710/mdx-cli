@@ -16,6 +16,9 @@ from mdx_cli.api.endpoints.vms import (
     list_vms,
     power_off_vm,
     power_on_vm,
+    reboot_vm,
+    reset_vm,
+    shutdown_vm,
     sync_vms,
 )
 from mdx_cli.api.spinner import stop_active_spinner
@@ -377,7 +380,7 @@ def stop(
     target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
 ) -> None:
-    """VM停止（パターンで複数台対応）"""
+    """VM強制停止（パターンで複数台対応）。正常停止は shutdown を使用"""
     client = get_client()
     vms = _resolve_vms(client, target, project_id)
 
@@ -394,7 +397,81 @@ def stop(
         stop_active_spinner()
         console.print(f"  [green]✓[/green] {v.name}")
 
-    console.print(f"\n{len(vms)}台の停止を実行しました")
+    console.print(f"\n{len(vms)}台の強制停止を実行しました")
+
+
+@app.command()
+def shutdown(
+    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
+    project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
+) -> None:
+    """VM正常シャットダウン（パターンで複数台対応）"""
+    client = get_client()
+    vms = _resolve_vms(client, target, project_id)
+
+    console.print(f"\n[bold]{len(vms)}台をシャットダウンします:[/bold]")
+    for v in vms:
+        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
+
+    if len(vms) > 1:
+        if not questionary.confirm(f"\n{len(vms)}台をシャットダウンしますか？").unsafe_ask():
+            raise typer.Abort()
+
+    for v in vms:
+        shutdown_vm(client, v.uuid)
+        stop_active_spinner()
+        console.print(f"  [green]✓[/green] {v.name}")
+
+    console.print(f"\n{len(vms)}台のシャットダウンを実行しました")
+
+
+@app.command()
+def reboot(
+    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
+    project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
+) -> None:
+    """VM再起動（パターンで複数台対応）"""
+    client = get_client()
+    vms = _resolve_vms(client, target, project_id)
+
+    console.print(f"\n[bold]{len(vms)}台を再起動します:[/bold]")
+    for v in vms:
+        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
+
+    if len(vms) > 1:
+        if not questionary.confirm(f"\n{len(vms)}台を再起動しますか？").unsafe_ask():
+            raise typer.Abort()
+
+    for v in vms:
+        reboot_vm(client, v.uuid)
+        stop_active_spinner()
+        console.print(f"  [green]✓[/green] {v.name}")
+
+    console.print(f"\n{len(vms)}台の再起動を実行しました")
+
+
+@app.command()
+def reset(
+    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
+    project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
+) -> None:
+    """VMリセット（パターンで複数台対応）"""
+    client = get_client()
+    vms = _resolve_vms(client, target, project_id)
+
+    console.print(f"\n[bold red]{len(vms)}台をリセットします:[/bold red]")
+    for v in vms:
+        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
+
+    if not questionary.confirm(f"\n本当に{len(vms)}台をリセットしますか？", default=False).unsafe_ask():
+        raise typer.Abort()
+
+    for v in vms:
+        reset_vm(client, v.uuid)
+        stop_active_spinner()
+        console.print(f"  [green]✓[/green] {v.name}")
+
+    console.print(f"\n{len(vms)}台のリセットを実行しました")
 
 
 @app.command()

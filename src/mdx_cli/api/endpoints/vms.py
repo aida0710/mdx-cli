@@ -56,6 +56,21 @@ def get_vm_csv(client: httpx.Client, vm_id: str) -> dict:
     return resp.json()
 
 
+def shutdown_vm(client: httpx.Client, vm_id: str) -> None:
+    resp = client.post(f"/api/vm/{vm_id}/shutdown/")
+    resp.raise_for_status()
+
+
+def reboot_vm(client: httpx.Client, vm_id: str) -> None:
+    resp = client.post(f"/api/vm/{vm_id}/reboot/")
+    resp.raise_for_status()
+
+
+def reset_vm(client: httpx.Client, vm_id: str) -> None:
+    resp = client.post(f"/api/vm/{vm_id}/reset/")
+    resp.raise_for_status()
+
+
 def sync_vms(client: httpx.Client, project_id: str) -> None:
     resp = client.post(f"/api/vm/synchronize/project/{project_id}/")
     resp.raise_for_status()
