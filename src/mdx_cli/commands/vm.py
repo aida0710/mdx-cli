@@ -299,9 +299,9 @@ def deploy(
         if not questionary.confirm("\nデプロイしますか？").unsafe_ask():
             raise typer.Abort()
 
-    # --- デプロイ実行（並列） ---
-    deploy_reqs = []
-    for name in vm_names:
+    # --- デプロイ実行（直列） ---
+    task_ids: list[str] = []
+    for i, name in enumerate(vm_names, 1):
         req = VMDeployRequest(
             catalog=selected_tmpl.uuid,
             project=pid,
@@ -316,48 +316,13 @@ def deploy(
             os_type=selected_tmpl.os_type or "Linux",
             power_on=power_on,
         )
-        deploy_reqs.append({"path": "/api/vm/deploy/", "json": req.model_dump()})
+        resp = deploy_vm(client, req)
+        tid = resp.task_id[0]
+        task_ids.append(tid)
+        stop_active_spinner()
+        console.print(f"  [green]✓[/green] ({i}/{len(vm_names)}) {name} → タスク: {tid}")
 
-    token, base_url = _get_token_and_base()
-    from mdx_cli.api.spinner import _console as spin_console
-    from rich.status import Status
-    status_display = Status("", console=spin_console, spinner="dots")
-    status_display.start()
-    done_count = 0
-
-    def on_deploy_progress(idx: int) -> None:
-        nonlocal done_count
-        done_count += 1
-        status_display.update(f"デプロイ中... ({done_count}/{len(vm_names)})")
-
-    results = parallel_post(base_url, token, deploy_reqs, on_progress=on_deploy_progress)
-    status_display.stop()
-
-    task_ids: list[str] = []
-    success_count = 0
-    fail_count = 0
-    failed_names: list[str] = []
-    for name, resp_data in zip(vm_names, results):
-        if isinstance(resp_data, Exception):
-            fail_count += 1
-            failed_names.append(name)
-            console.print(f"  [red]✗[/red] {name} → エラー: {resp_data}")
-            continue
-        tid = resp_data.get("task_id", "")
-        if isinstance(tid, list):
-            tid = tid[0] if tid else ""
-        if tid:
-            task_ids.append(tid)
-            success_count += 1
-            console.print(f"  [green]✓[/green] {name} → タスク: {tid}")
-        else:
-            fail_count += 1
-            failed_names.append(name)
-            console.print(f"  [red]✗[/red] {name} → レスポンス異常: {resp_data}")
-
-    console.print(f"\n成功: {success_count}台  失敗: {fail_count}台")
-    if failed_names:
-        console.print(f"[red]失敗したVM: {', '.join(failed_names[:10])}{'...' if len(failed_names) > 10 else ''}[/red]")
+    console.print(f"\n{len(task_ids)}台のデプロイを開始しました")
 
     if not no_wait and task_ids:
         task_results = _parallel_task_wait(task_ids)
