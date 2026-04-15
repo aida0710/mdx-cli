@@ -17,6 +17,7 @@ from mdx_cli.api.endpoints.vms import (
     power_off_vm,
     power_on_vm,
     reboot_vm,
+    reconfigure_vm,
     reset_vm,
     shutdown_vm,
     sync_vms,
@@ -472,6 +473,160 @@ def reset(
         console.print(f"  [green]✓[/green] {v.name}")
 
     console.print(f"\n{len(vms)}台のリセットを実行しました")
+
+
+@app.command()
+def reconfigure(
+    target: str = typer.Argument(None, help="VM名またはUUID（省略時は一覧から選択）"),
+    project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
+    no_wait: bool = typer.Option(False, "--no-wait", help="タスク完了を待たない"),
+) -> None:
+    """VM構成変更（対話式。パック数・ディスクサイズを変更）"""
+    pid = resolve_project_id(project_id)
+    client = get_client()
+
+    # VM選択
+    if not target:
+        all_vms = list_vms(client, pid)
+        stop_active_spinner()
+        console.print("\n[bold]VM一覧:[/bold]")
+        for i, v in enumerate(all_vms, 1):
+            console.print(f"  {i}) {v.name} [{v.status}]")
+        idx = int(questionary.text("\n番号を入力:").unsafe_ask()) - 1
+        selected_vm = all_vms[idx]
+    elif len(target) == 36 and "-" in target:
+        selected_vm = None
+        vm_uuid = target
+    else:
+        all_vms = list_vms(client, pid)
+        stop_active_spinner()
+        matched = [v for v in all_vms if v.name == target]
+        if not matched:
+            console.print(f"[red]VM '{target}' が見つかりません[/red]")
+            raise typer.Exit(code=1)
+        selected_vm = matched[0]
+
+    if selected_vm:
+        vm_uuid = selected_vm.uuid
+
+    # VM詳細を取得
+    vm = get_vm(client, vm_uuid)
+    stop_active_spinner()
+    extra = getattr(vm, "model_extra", {}) or {}
+
+    # 現在の構成を表示
+    console.print(f"\n[bold]{vm.name}[/bold] の現在の構成:")
+    console.print(f"  状態:     {vm.status}")
+    console.print(f"  パック:   {extra.get('pack_type', 'cpu')} x {extra.get('pack_num', '?')}")
+    console.print(f"  CPU:      {extra.get('cpu', '?')}")
+    console.print(f"  メモリ:   {extra.get('memory', '?')}")
+    disks = extra.get("hard_disks", [])
+    for d in disks:
+        console.print(f"  ディスク: #{d.get('disk_number', '?')}: {d.get('capacity', '?')}")
+
+    # 稼働中なら停止が必要
+    if vm.status == "PowerON":
+        console.print(f"\n[yellow]構成変更にはVMの停止が必要です。[/yellow]")
+        if not questionary.confirm("VMを停止して構成変更しますか？").unsafe_ask():
+            raise typer.Abort()
+        shutdown_vm(client, vm_uuid)
+        stop_active_spinner()
+        console.print("シャットダウン中...")
+        import time
+        for _ in range(60):
+            time.sleep(5)
+            vm_check = get_vm(client, vm_uuid)
+            stop_active_spinner()
+            if vm_check.status != "PowerON":
+                console.print(f"  状態: {vm_check.status}")
+                break
+
+    # 新しい構成を入力
+    console.print(f"\n[bold]新しい構成（Enterで変更なし）:[/bold]")
+
+    pack_type = extra.get("pack_type", "cpu")
+    current_pack_num = extra.get("pack_num", 3)
+    if pack_type == "cpu":
+        max_pack = 152
+        mem_per_pack = 1.51
+    else:
+        max_pack = 8
+        mem_per_pack = 57.60
+
+    new_pack_num = int(questionary.text(
+        f"パック数 ({pack_type}, 最大{max_pack}):",
+        default=str(current_pack_num),
+    ).unsafe_ask())
+
+    new_total_mem = new_pack_num * mem_per_pack
+    if pack_type == "cpu":
+        console.print(f"  → [cyan]{new_pack_num}コア / {new_total_mem:.1f}GB RAM[/cyan]")
+    else:
+        console.print(f"  → [cyan]{new_pack_num * 18}コア / {new_pack_num}GPU / {new_total_mem:.1f}GB RAM[/cyan]")
+
+    # ディスクサイズ変更
+    new_disks = []
+    for d in disks:
+        current_cap = d.get("capacity", "").replace(" GB", "").strip()
+        try:
+            current_cap_int = int(float(current_cap))
+        except (ValueError, TypeError):
+            current_cap_int = 40
+        new_cap = int(questionary.text(
+            f"ディスク #{d.get('disk_number', '?')} (GB):",
+            default=str(current_cap_int),
+        ).unsafe_ask())
+        new_disks.append({
+            "disk_number": d.get("disk_number", 1),
+            "device_key": d.get("device_key", 2000),
+            "capacity": new_cap,
+        })
+
+    # ネットワーク（現在の構成をそのまま維持）
+    nets = extra.get("service_networks", [])
+    network_adapters = []
+    segments = list_segments(client, pid)
+    stop_active_spinner()
+    default_seg = segments[0].uuid if segments else ""
+    for n in nets:
+        seg_name = n.get("segment", "")
+        seg_uuid = default_seg
+        for s in segments:
+            if s.name == seg_name:
+                seg_uuid = s.uuid
+                break
+        network_adapters.append({
+            "adapter_number": n.get("adapter_number", 1),
+            "segment": seg_uuid,
+        })
+    if not network_adapters:
+        network_adapters = [{"adapter_number": 1, "segment": default_seg}]
+
+    # 確認
+    console.print(f"\n[bold]変更内容:[/bold]")
+    console.print(f"  パック: {pack_type} x {current_pack_num} → {new_pack_num}")
+    for d_old, d_new in zip(disks, new_disks):
+        old_cap = d_old.get("capacity", "?")
+        console.print(f"  ディスク #{d_new['disk_number']}: {old_cap} → {d_new['capacity']} GB")
+
+    if not questionary.confirm("\n構成変更を実行しますか？").unsafe_ask():
+        raise typer.Abort()
+
+    config = {
+        "hard_disks": new_disks,
+        "network_adapters": network_adapters,
+        "pack_num": new_pack_num,
+    }
+    task_id = reconfigure_vm(client, vm_uuid, config)
+    stop_active_spinner()
+    console.print(f"構成変更タスク開始: {task_id}")
+
+    if not no_wait:
+        settings = Settings()
+        task = wait_for_task(client, task_id, poll_interval=settings.task_poll_interval, timeout=settings.task_poll_timeout)
+        stop_active_spinner()
+        status_style = "[green]" if task.status.value == "Completed" else "[red]"
+        console.print(f"  {status_style}タスク完了: {task.status.value}[/]")
 
 
 @app.command()
