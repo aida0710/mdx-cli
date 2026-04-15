@@ -21,7 +21,10 @@ def get_vm(client: httpx.Client, vm_id: str) -> VM:
 def deploy_vm(client: httpx.Client, request: VMDeployRequest) -> VMDeployResponse:
     resp = client.post("/api/vm/deploy/", json=request.model_dump())
     resp.raise_for_status()
-    return VMDeployResponse.model_validate(resp.json())
+    data = resp.json()
+    if isinstance(data.get("task_id"), str):
+        data["task_id"] = [data["task_id"]]
+    return VMDeployResponse.model_validate(data)
 
 
 def power_on_vm(client: httpx.Client, vm_id: str, service_level: str = "spot") -> None:
@@ -39,7 +42,11 @@ def power_off_vm(client: httpx.Client, vm_id: str) -> None:
 def destroy_vm(client: httpx.Client, vm_id: str) -> VMDeployResponse:
     resp = client.post(f"/api/vm/{vm_id}/destroy/")
     resp.raise_for_status()
-    return VMDeployResponse.model_validate(resp.json())
+    data = resp.json()
+    # task_id が文字列の場合はリストに変換
+    if isinstance(data.get("task_id"), str):
+        data["task_id"] = [data["task_id"]]
+    return VMDeployResponse.model_validate(data)
 
 
 def get_vm_csv(client: httpx.Client, vm_id: str) -> dict:

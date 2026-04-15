@@ -407,12 +407,27 @@ def destroy(
     client = get_client()
     vms = _resolve_vms(client, target, project_id)
 
+    # PowerON の VM があれば先に停止
+    running_vms = [v for v in vms if v.status == "PowerON"]
+    if running_vms:
+        console.print(f"\n[yellow]{len(running_vms)}台が稼働中です。先に停止します。[/yellow]")
+        for v in running_vms:
+            console.print(f"  {v.name} [{v.status}]")
+
     console.print(f"\n[bold red]{len(vms)}台を削除します:[/bold red]")
     for v in vms:
         console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
 
     if not questionary.confirm(f"\n本当に{len(vms)}台を削除しますか？", default=False).unsafe_ask():
         raise typer.Abort()
+
+    # 稼働中VMを停止
+    if running_vms:
+        for v in running_vms:
+            power_off_vm(client, v.uuid)
+            stop_active_spinner()
+            console.print(f"  [yellow]停止[/yellow] {v.name}")
+        console.print("")
 
     task_ids: list[str] = []
     for v in vms:
