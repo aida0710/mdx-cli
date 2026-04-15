@@ -348,7 +348,7 @@ def _resolve_vms(client, pattern: str, project_id: str | None) -> list:
 
 @app.command()
 def start(
-    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: crawler-*)"),
+    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
     service_level: str = typer.Option("spot", "--service-level", "-s", help="サービスレベル"),
 ) -> None:
@@ -374,7 +374,7 @@ def start(
 
 @app.command()
 def stop(
-    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: crawler-*)"),
+    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
 ) -> None:
     """VM停止（パターンで複数台対応）"""
@@ -399,7 +399,7 @@ def stop(
 
 @app.command()
 def destroy(
-    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: crawler-*)"),
+    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
     no_wait: bool = typer.Option(False, "--no-wait", help="タスク完了を待たない"),
 ) -> None:
