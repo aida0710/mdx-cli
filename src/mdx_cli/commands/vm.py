@@ -653,12 +653,25 @@ def destroy(
     if not questionary.confirm(f"\n本当に{len(vms)}台を削除しますか？", default=False).unsafe_ask():
         raise typer.Abort()
 
-    # 稼働中VMを停止
+    # 稼働中VMを停止して完了を待つ
     if running_vms:
+        import time
         for v in running_vms:
             power_off_vm(client, v.uuid)
             stop_active_spinner()
-            console.print(f"  [yellow]停止[/yellow] {v.name}")
+            console.print(f"  [yellow]停止中[/yellow] {v.name}", end="")
+        # 全VMがPowerOFF になるまで待機
+        pending = {v.uuid for v in running_vms}
+        for _ in range(60):
+            time.sleep(5)
+            for vid in list(pending):
+                vm_check = get_vm(client, vid)
+                stop_active_spinner()
+                if vm_check.status != "PowerON":
+                    pending.discard(vid)
+            if not pending:
+                break
+        console.print(f"  → 停止完了")
         console.print("")
 
     task_ids: list[str] = []
