@@ -6,7 +6,7 @@ from mdx_cli.api.endpoints.auth import sso_login
 from mdx_cli.credentials.store import CredentialStore
 from mdx_cli.settings import Settings
 
-app = typer.Typer(help="認証管理")
+app = typer.Typer(no_args_is_help=True, help="認証管理")
 console = Console()
 
 

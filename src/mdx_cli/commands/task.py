@@ -8,7 +8,7 @@ from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import HISTORY_COLUMNS, TASK_COLUMNS
 from mdx_cli.settings import Settings
 
-app = typer.Typer(help="タスク管理")
+app = typer.Typer(no_args_is_help=True, help="タスク管理")
 console = Console()
 
 

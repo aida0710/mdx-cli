@@ -27,7 +27,7 @@ from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import VM_COLUMNS
 from mdx_cli.settings import Settings
 
-app = typer.Typer(help="仮想マシン管理")
+app = typer.Typer(no_args_is_help=True, help="仮想マシン管理")
 console = Console()
 
 

@@ -9,7 +9,7 @@ from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import TEMPLATE_COLUMNS
 from mdx_cli.settings import Settings
 
-app = typer.Typer(help="テンプレート管理")
+app = typer.Typer(no_args_is_help=True, help="テンプレート管理")
 console = Console()
 
 
