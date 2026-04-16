@@ -16,6 +16,13 @@ Web ポータル (oprpl.mdx.jp) の操作をコマンドラインから実行で
 uv tool install .
 ```
 
+### アップデート
+
+```bash
+git pull
+uv tool install . --force
+```
+
 ## クイックスタート
 
 ```bash
