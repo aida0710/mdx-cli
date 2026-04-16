@@ -1,7 +1,9 @@
+from unittest.mock import patch
+
 import httpx
 import respx
 
-from mdx_cli.api.endpoints.auth import _parse_form, refresh_token
+from mdx_cli.api.endpoints.auth import _parse_form, refresh_token, sso_login
 
 
 def test_parse_form_extracts_fields():
@@ -46,3 +48,14 @@ def test_refresh_token_failure():
     client = httpx.Client(base_url="https://oprpl.mdx.jp")
     new_token = refresh_token(client, "expired-jwt")
     assert new_token is None
+
+
+def test_sso_login_uses_ipv4_transport():
+    """sso_login のセッションが IPv4 専用トランスポートを使用していること。"""
+    with patch("mdx_cli.api.endpoints.auth.httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value.get.side_effect = httpx.ConnectError("test")
+        sso_login("https://oprpl.mdx.jp", "user", "pass", "123456")
+        call_kwargs = mock_client_cls.call_args.kwargs
+        transport = call_kwargs["transport"]
+        assert isinstance(transport, httpx.HTTPTransport)
+        assert transport._pool._local_address == "0.0.0.0"
