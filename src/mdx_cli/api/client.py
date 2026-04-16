@@ -62,6 +62,7 @@ def create_client(
         timeout=timeout or settings.request_timeout,
         auth=MDXAuth(token=token, token_save_path=token_save_path, relogin_fn=relogin_fn) if token else None,
         event_hooks=spinner.hooks(),
+        transport=httpx.HTTPTransport(local_address="0.0.0.0"),
     )
     # スピナーインスタンスをクライアントに保持（ページネーション進捗更新用）
     client._spinner = spinner  # type: ignore[attr-defined]
