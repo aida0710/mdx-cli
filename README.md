@@ -4,6 +4,8 @@
 
 Web ポータル (oprpl.mdx.jp) の操作をコマンドラインから実行できます。VM の一括作成・起動・停止、SSH接続、ネットワーク管理、DNAT/ACL 設定などに対応。
 
+<img width="2606" height="1914" alt="image" src="https://github.com/user-attachments/assets/03419e55-f040-4c11-b0f0-e01125324a76" />
+
 ## 前提条件
 
 - **MDX内部ネットワークからの実行が必要です。** MDX VPN 接続中、または MDX VM 上から実行してください。`oprpl.mdx.jp` および `mdxidm.mdx.jp` への疎通が必要です。
