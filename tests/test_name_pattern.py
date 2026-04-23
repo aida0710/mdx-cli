@@ -1,4 +1,8 @@
-from mdx_cli.commands._name_pattern import expand_name_pattern, match_names
+from mdx_cli.commands._name_pattern import (
+    expand_name_pattern,
+    expand_name_pattern_for_deploy,
+    match_names,
+)
 
 
 def test_no_pattern():
@@ -71,3 +75,66 @@ def test_match_question_mark():
 
 def test_match_no_result():
     assert match_names("nonexistent-*", ALL_VMS) == []
+
+
+# --- expand_name_pattern_for_deploy ---
+# MDX deploy API は vm_name の [N-M] 範囲記法をサーバー側で展開する。
+# ただし対応は単一桁数値（0-9）のみで、複数桁・ゼロ埋め・アルファベットは非対応。
+
+
+def test_deploy_no_pattern():
+    assert expand_name_pattern_for_deploy("my-vm") == ["my-vm"]
+
+
+def test_deploy_single_digit_range():
+    """単一桁数値範囲はAPI記法を維持して1要素のリストを返す。"""
+    assert expand_name_pattern_for_deploy("vm-{0-9}") == ["vm-[0-9]"]
+
+
+def test_deploy_partial_single_digit_range():
+    """単一桁数値の部分範囲もAPI記法を維持。"""
+    assert expand_name_pattern_for_deploy("vm-{3-7}") == ["vm-[3-7]"]
+
+
+def test_deploy_multi_digit_range_expanded():
+    """複数桁数値はAPI非対応のためクライアント側で展開。"""
+    result = expand_name_pattern_for_deploy("vm-{1-99}")
+    assert len(result) == 99
+    assert result[0] == "vm-1"
+    assert result[-1] == "vm-99"
+
+
+def test_deploy_double_digit_range_expanded():
+    """複数桁数値はAPI非対応のためクライアント側で展開。"""
+    result = expand_name_pattern_for_deploy("vm-{10-20}")
+    assert len(result) == 11
+    assert result[0] == "vm-10"
+    assert result[-1] == "vm-20"
+
+
+def test_deploy_zero_padded_expanded():
+    """ゼロ埋めはAPI非対応のためクライアント側で展開。"""
+    assert expand_name_pattern_for_deploy("vm-{00-09}") == [
+        "vm-00", "vm-01", "vm-02", "vm-03", "vm-04",
+        "vm-05", "vm-06", "vm-07", "vm-08", "vm-09",
+    ]
+
+
+def test_deploy_alpha_expanded():
+    """アルファベットはAPI非対応のためクライアント側で展開。"""
+    assert expand_name_pattern_for_deploy("vm-{a-c}") == ["vm-a", "vm-b", "vm-c"]
+
+
+def test_deploy_combined_alpha_and_digit():
+    """アルファベットは展開、数値部分はAPI記法を維持。"""
+    assert expand_name_pattern_for_deploy("vm-{a-c}-{0-9}") == [
+        "vm-a-[0-9]", "vm-b-[0-9]", "vm-c-[0-9]",
+    ]
+
+
+def test_deploy_alpha_with_zero_padded():
+    """両方がAPI非対応の場合は完全に展開。"""
+    result = expand_name_pattern_for_deploy("vm-{a-b}-{00-09}")
+    assert len(result) == 20
+    assert result[0] == "vm-a-00"
+    assert result[-1] == "vm-b-09"

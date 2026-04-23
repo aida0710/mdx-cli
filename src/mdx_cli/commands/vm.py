@@ -27,7 +27,11 @@ from mdx_cli.api.parallel import parallel_post, parallel_wait
 from mdx_cli.api.spinner import stop_active_spinner
 from mdx_cli.commands._common import get_client, ask_or_abort, resolve_project_id
 from mdx_cli.credentials.store import CredentialStore
-from mdx_cli.commands._name_pattern import expand_name_pattern, match_names
+from mdx_cli.commands._name_pattern import (
+    expand_name_pattern,
+    expand_name_pattern_for_deploy,
+    match_names,
+)
 from mdx_cli.models.vm import VMDeployRequest
 from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import VM_COLUMNS
@@ -234,11 +238,18 @@ def deploy(
         vm_name_pattern = name
     else:
         console.print("\n[bold]VM名[/bold]")
-        console.print("[dim]  パターンで一括作成: my-vm-{0-9} → 10台, name-{a-c}-{0-9} → 30台[/dim]")
+        console.print("[dim]  パターンで一括作成: my-vm-{0-9} → 10台 (1リクエスト), name-{a-c}-{0-9} → 30台 (3リクエスト)[/dim]")
         vm_name_pattern = questionary.text("VM名:").unsafe_ask()
     vm_names = expand_name_pattern(vm_name_pattern)
+    deploy_patterns = expand_name_pattern_for_deploy(vm_name_pattern)
     if len(vm_names) > 1:
-        console.print(f"  → {len(vm_names)}台: {vm_names[0]} 〜 {vm_names[-1]}")
+        if len(deploy_patterns) < len(vm_names):
+            console.print(
+                f"  → {len(vm_names)}台 ({len(deploy_patterns)} リクエストにバッチ集約): "
+                f"{vm_names[0]} 〜 {vm_names[-1]}"
+            )
+        else:
+            console.print(f"  → {len(vm_names)}台: {vm_names[0]} 〜 {vm_names[-1]}")
 
     # --- パックタイプ ---
     if pack_type_opt:
@@ -299,13 +310,13 @@ def deploy(
         if not questionary.confirm("\nデプロイしますか？").unsafe_ask():
             raise typer.Abort()
 
-    # --- デプロイ実行（直列） ---
+    # --- デプロイ実行（直列、API範囲記法でリクエスト集約） ---
     task_ids: list[str] = []
-    for i, name in enumerate(vm_names, 1):
+    for i, pattern in enumerate(deploy_patterns, 1):
         req = VMDeployRequest(
             catalog=selected_tmpl.uuid,
             project=pid,
-            vm_name=name,
+            vm_name=pattern,
             disk_size=disk_size,
             pack_type=pack_type,
             pack_num=pack_num,
@@ -317,10 +328,16 @@ def deploy(
             power_on=power_on,
         )
         resp = deploy_vm(client, req)
-        tid = resp.task_id[0]
-        task_ids.append(tid)
+        task_ids.extend(resp.task_id)
         stop_active_spinner()
-        console.print(f"  [green]✓[/green] ({i}/{len(vm_names)}) {name} → タスク: {tid}")
+        if len(resp.task_id) > 1:
+            console.print(
+                f"  [green]✓[/green] ({i}/{len(deploy_patterns)}) {pattern} → {len(resp.task_id)}台分のタスクID"
+            )
+        else:
+            console.print(
+                f"  [green]✓[/green] ({i}/{len(deploy_patterns)}) {pattern} → タスク: {resp.task_id[0]}"
+            )
 
     console.print(f"\n{len(task_ids)}台のデプロイを開始しました")
 
@@ -365,30 +382,75 @@ def _get_token_and_base() -> tuple[str, str]:
     return store.load_token() or "", settings.base_url
 
 
+def _refresh_token_proactive() -> None:
+    """バルク操作前にトークンを事前リフレッシュして保存する。
+
+    parallel_post は MDXAuth を経由しないため、途中で401を食らうと
+    リトライで無駄なリクエストが発生する。事前に1回refreshしておくことで、
+    並列リクエスト全体を新鮮なトークンで送れる。
+    失敗しても例外は投げず、既存トークンで続行（MDXAuth の 401 ハンドリングが保険）。
+    """
+    import logging
+    logger = logging.getLogger("mdx_cli")
+
+    settings = Settings()
+    store = CredentialStore(config_dir=settings.config_dir)
+    token = store.load_token()
+    if not token:
+        return
+
+    try:
+        with httpx.Client(
+            base_url=settings.base_url,
+            timeout=30,
+            transport=httpx.HTTPTransport(local_address="0.0.0.0"),
+        ) as client:
+            resp = client.post("/api/refresh/", json={"token": token})
+            if resp.status_code == 200:
+                new_token = resp.json().get("token")
+                if new_token:
+                    store.save_token(new_token)
+                    logger.debug("バルク操作前にトークンをリフレッシュしました")
+    except Exception as e:
+        logger.debug("事前リフレッシュに失敗（既存トークンで続行）: %s", e)
+
+
+_CHUNK_SIZE = 30
+
+
 def _parallel_vm_action(vms: list, action_path_fn, action_name: str, json_fn=None) -> list[dict]:
     """VM一括操作を並列実行する。
 
     action_path_fn: VM → APIパス (例: lambda v: f"/api/vm/{v.uuid}/power_on/")
     json_fn: VM → POSTボディ (省略時は None)
+
+    30台ごとにトークンを事前リフレッシュしてから並列POSTする。
+    長時間のバルク操作でもトークンが途中で切れない。
     """
     from mdx_cli.api.spinner import _console as spin_console
     from rich.status import Status
 
-    token, base_url = _get_token_and_base()
-    reqs = [{"path": action_path_fn(v), "json": json_fn(v) if json_fn else None} for v in vms]
-
     status_display = Status("", console=spin_console, spinner="dots")
     status_display.start()
     done_count = 0
+    total = len(vms)
 
     def on_progress(idx: int) -> None:
         nonlocal done_count
         done_count += 1
-        status_display.update(f"{action_name}... ({done_count}/{len(vms)})")
+        status_display.update(f"{action_name}... ({done_count}/{total})")
 
-    results = parallel_post(base_url, token, reqs, on_progress=on_progress)
+    all_results: list[dict] = []
+    for chunk_start in range(0, total, _CHUNK_SIZE):
+        chunk = vms[chunk_start:chunk_start + _CHUNK_SIZE]
+        _refresh_token_proactive()
+        token, base_url = _get_token_and_base()
+        reqs = [{"path": action_path_fn(v), "json": json_fn(v) if json_fn else None} for v in chunk]
+        results = parallel_post(base_url, token, reqs, on_progress=on_progress)
+        all_results.extend(results)
+
     status_display.stop()
-    return results
+    return all_results
 
 
 def _parallel_task_wait(task_ids: list[str]) -> list[dict]:
