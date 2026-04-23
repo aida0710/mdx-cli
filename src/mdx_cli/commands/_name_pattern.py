@@ -60,6 +60,54 @@ def expand_name_pattern(pattern: str) -> list[str]:
     return names
 
 
+def _expand_range_for_deploy(match: str) -> list[str]:
+    """deploy API 用に {start-end} を展開する。
+
+    MDX deploy API は vm_name の [N-M] 範囲記法をサーバー側で展開するが、
+    対応は単一桁数値（0-9）のみ。それ以外はクライアント側で展開する。
+    """
+    inner = match[1:-1]
+    parts = inner.split("-", 1)
+    if len(parts) != 2:
+        return [match]
+
+    start, end = parts[0], parts[1]
+
+    # 単一桁数値範囲はAPI記法を維持（API側で展開させる）
+    if (
+        len(start) == 1
+        and len(end) == 1
+        and start.isdigit()
+        and end.isdigit()
+    ):
+        return [f"[{start}-{end}]"]
+
+    # それ以外はクライアント側で展開（既存ロジックと同じ）
+    return _expand_range(match)
+
+
+def expand_name_pattern_for_deploy(pattern: str) -> list[str]:
+    """deploy API 用にパターンを展開する。
+
+    単一桁数値範囲（{0-9} 等）は [0-9] のまま残してAPIに展開を任せる。
+    アルファベット・複数桁・ゼロ埋めはクライアント側で展開する。
+    """
+    ranges = re.findall(r"\{[^}]+\}", pattern)
+    if not ranges:
+        return [pattern]
+
+    expanded = [_expand_range_for_deploy(r) for r in ranges]
+
+    names = []
+    for combo in itertools.product(*expanded):
+        name = pattern
+        for original, replacement in zip(ranges, combo):
+            name = name.replace(original, replacement, 1)
+        names.append(name)
+
+    return names
+
+
 def match_names(pattern: str, names: list[str]) -> list[str]:
     """パターンに一致する名前をフィルタする。
 
