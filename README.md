@@ -231,16 +231,21 @@ mdx vm destroy "test-*"
 mdx vm stop "worker-{a-c}-*"
 ```
 
-### 構成変更（対話式）
+### 構成変更（対話式、パターン対応）
 
-VMのパック数・ディスクサイズを変更。稼働中VMは自動停止します。
+VMのパック数・ディスクサイズを変更。稼働中VMは自動停止します。パターン指定で複数台を一括変更可能。
 
 ```bash
-mdx vm reconfigure my-vm     # 名前指定
-mdx vm reconfigure            # 一覧から選択
+mdx vm reconfigure my-vm              # 名前指定
+mdx vm reconfigure                    # 一覧から選択
+mdx vm reconfigure "worker-*"         # パターンで複数台一括
+mdx vm reconfigure "worker-{a-c}-*"   # 範囲パターン
 ```
 
-複数台操作時は対象一覧を表示して確認を求めます。
+複数台指定時の制約：
+- `pack_type`（cpu / gpu）が全VMで一致していること
+- ディスク本数が全VMで一致していること
+- 新しい `pack_num` と各ディスクの新容量は全VM共通で適用（`device_key` と `segment` は各VMの現状を保持）
 
 ### CSV出力
 

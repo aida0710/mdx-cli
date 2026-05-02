@@ -2,16 +2,28 @@
 
 import typer
 
+from mdx_cli.api.auth import refresh_saved_token, token_needs_refresh
 from mdx_cli.api.client import create_client
 from mdx_cli.credentials.store import CredentialStore
 from mdx_cli.settings import Settings
 
 
 def get_client(silent: bool = False):
-    """認証済みhttpxクライアントを取得する。"""
+    """認証済みhttpxクライアントを取得する。
+
+    トークンの期限が近い場合は事前リフレッシュして保存し、新トークンでクライアントを作る。
+    リフレッシュ失敗時は既存トークンで続行（MDXAuth の 401 ハンドリングが保険）。
+    """
     settings = Settings()
     store = CredentialStore(config_dir=settings.config_dir)
     token = store.load_token()
+
+    if token and token_needs_refresh(token):
+        new_token = refresh_saved_token(token, settings.base_url)
+        if new_token:
+            store.save_token(new_token)
+            token = new_token
+
     return create_client(token=token, silent=silent)
 
 

@@ -383,15 +383,12 @@ def _get_token_and_base() -> tuple[str, str]:
 
 
 def _refresh_token_proactive() -> None:
-    """バルク操作前にトークンを事前リフレッシュして保存する。
+    """バルク操作前にトークンを無条件リフレッシュして保存する。
 
-    parallel_post は MDXAuth を経由しないため、途中で401を食らうと
-    リトライで無駄なリクエストが発生する。事前に1回refreshしておくことで、
-    並列リクエスト全体を新鮮なトークンで送れる。
-    失敗しても例外は投げず、既存トークンで続行（MDXAuth の 401 ハンドリングが保険）。
+    parallel_post は MDXAuth を経由しないため、チャンクごとに新鮮なトークンを
+    取得しておく。失敗時は既存トークンで続行。
     """
-    import logging
-    logger = logging.getLogger("mdx_cli")
+    from mdx_cli.api.auth import refresh_saved_token
 
     settings = Settings()
     store = CredentialStore(config_dir=settings.config_dir)
@@ -399,23 +396,138 @@ def _refresh_token_proactive() -> None:
     if not token:
         return
 
-    try:
-        with httpx.Client(
-            base_url=settings.base_url,
-            timeout=30,
-            transport=httpx.HTTPTransport(local_address="0.0.0.0"),
-        ) as client:
-            resp = client.post("/api/refresh/", json={"token": token})
-            if resp.status_code == 200:
-                new_token = resp.json().get("token")
-                if new_token:
-                    store.save_token(new_token)
-                    logger.debug("バルク操作前にトークンをリフレッシュしました")
-    except Exception as e:
-        logger.debug("事前リフレッシュに失敗（既存トークンで続行）: %s", e)
+    new_token = refresh_saved_token(token, settings.base_url)
+    if new_token:
+        store.save_token(new_token)
 
 
 _CHUNK_SIZE = 30
+
+
+def _fetch_vm_details(client, vms_brief: list) -> list:
+    """VMリストの詳細を並列取得する（進捗表示付き）。
+
+    単一の場合は渡されたクライアントで同期取得。
+    複数の場合は parallel_get で並列化し、完了ごとにVM名を進捗表示する。
+    """
+    from mdx_cli.api.spinner import _console as spin_console
+    from mdx_cli.api.parallel import parallel_get
+    from mdx_cli.models.vm import VM
+    from rich.status import Status
+
+    if len(vms_brief) == 1:
+        return [get_vm(client, vms_brief[0].uuid)]
+
+    token, base_url = _get_token_and_base()
+    total = len(vms_brief)
+    status_display = Status("", console=spin_console, spinner="dots")
+    status_display.start()
+    done_count = 0
+
+    def on_progress(idx: int) -> None:
+        nonlocal done_count
+        done_count += 1
+        name = vms_brief[idx].name
+        status_display.update(f"詳細取得中... ({done_count}/{total}) {name}")
+
+    paths = [f"/api/vm/{v.uuid}/" for v in vms_brief]
+    results = parallel_get(
+        base_url, token, paths, on_progress=on_progress, return_exceptions=True
+    )
+    status_display.stop()
+
+    vms_detail = []
+    missing = []
+    for brief, data in zip(vms_brief, results):
+        if isinstance(data, Exception):
+            missing.append(brief)
+            continue
+        if "uuid" not in data:
+            data["uuid"] = brief.uuid
+        vms_detail.append(VM.model_validate(data))
+
+    if missing:
+        console.print(
+            f"[yellow]※ {len(missing)}台の詳細取得に失敗しました（リトライ後も失敗・サーバー負荷の可能性）:[/yellow]"
+        )
+        for v in missing:
+            console.print(f"  - {v.name} [dim]({v.uuid})[/dim]")
+
+    return vms_detail
+
+
+def _wait_for_poweroff(running_vms: list, poll_interval: int = 5, max_polls: int = 60) -> None:
+    """指定VMが全て PowerOFF になるまで並列ポーリングする（進捗表示付き）。"""
+    import asyncio
+    from mdx_cli.api.spinner import _console as spin_console
+    from rich.status import Status
+
+    token, base_url = _get_token_and_base()
+    settings = Settings()
+    resolved = base_url if base_url.endswith("/") else base_url + "/"
+    total = len(running_vms)
+
+    status_display = Status("", console=spin_console, spinner="dots")
+    status_display.start()
+    done_count = 0
+    last_done_name = ""
+    status_display.update(f"停止待機中... (0/{total})")
+
+    def update_display() -> None:
+        if last_done_name:
+            status_display.update(
+                f"停止待機中... ({done_count}/{total}) 完了: {last_done_name}"
+            )
+        else:
+            status_display.update(f"停止待機中... ({done_count}/{total})")
+
+    async def _run():
+        nonlocal done_count, last_done_name
+        async with httpx.AsyncClient(
+            base_url=resolved,
+            timeout=settings.request_timeout,
+            headers={"Authorization": f"JWT {token}"},
+        ) as ac:
+            async def _poll(vm):
+                nonlocal done_count, last_done_name
+                for _ in range(max_polls):
+                    resp = await ac.get(f"/api/vm/{vm.uuid}/")
+                    if resp.json().get("status") != "PowerON":
+                        done_count += 1
+                        last_done_name = vm.name
+                        update_display()
+                        return
+                    await asyncio.sleep(poll_interval)
+            await asyncio.gather(*[_poll(v) for v in running_vms])
+
+    try:
+        asyncio.run(_run())
+    finally:
+        status_display.stop()
+
+
+def _check_reconfigure_homogeneity(vms: list) -> None:
+    """bulk reconfigure で全VMのpack_typeとディスク本数が一致するか検証する。
+
+    不一致の場合はエラー表示してtyper.Exitを送出する。
+    """
+    pack_types = set()
+    disk_counts = set()
+    for v in vms:
+        extra = getattr(v, "model_extra", {}) or {}
+        pack_types.add(extra.get("pack_type"))
+        disk_counts.add(len(extra.get("hard_disks", [])))
+
+    if len(pack_types) > 1:
+        console.print(
+            f"[red]pack_type が混在しているため一括構成変更できません: {pack_types}[/red]"
+        )
+        raise typer.Exit(code=1)
+    if len(disk_counts) > 1:
+        console.print(
+            f"[red]ディスク本数が混在しているため一括構成変更できません: {disk_counts}[/red]"
+        )
+        raise typer.Exit(code=1)
 
 
 def _parallel_vm_action(vms: list, action_path_fn, action_name: str, json_fn=None) -> list[dict]:
@@ -435,17 +547,19 @@ def _parallel_vm_action(vms: list, action_path_fn, action_name: str, json_fn=Non
     done_count = 0
     total = len(vms)
 
-    def on_progress(idx: int) -> None:
-        nonlocal done_count
-        done_count += 1
-        status_display.update(f"{action_name}... ({done_count}/{total})")
-
     all_results: list[dict] = []
     for chunk_start in range(0, total, _CHUNK_SIZE):
         chunk = vms[chunk_start:chunk_start + _CHUNK_SIZE]
         _refresh_token_proactive()
         token, base_url = _get_token_and_base()
         reqs = [{"path": action_path_fn(v), "json": json_fn(v) if json_fn else None} for v in chunk]
+
+        def on_progress(idx: int, _chunk=chunk) -> None:
+            nonlocal done_count
+            done_count += 1
+            name = _chunk[idx].name
+            status_display.update(f"{action_name}... ({done_count}/{total}) {name}")
+
         results = parallel_post(base_url, token, reqs, on_progress=on_progress)
         all_results.extend(results)
 
@@ -608,7 +722,7 @@ def reconfigure(
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
     no_wait: bool = typer.Option(False, "--no-wait", help="タスク完了を待たない"),
 ) -> None:
-    """VM構成変更（対話式。パック数・ディスクサイズを変更）"""
+    """VM構成変更（対話式。パック数・ディスクサイズを変更。パターンで複数台対応）"""
     pid = resolve_project_id(project_id)
     client = get_client()
 
@@ -620,59 +734,61 @@ def reconfigure(
         for i, v in enumerate(all_vms, 1):
             console.print(f"  {i}) {v.name} [{v.status}]")
         idx = int(questionary.text("\n番号を入力:").unsafe_ask()) - 1
-        selected_vm = all_vms[idx]
-    elif len(target) == 36 and "-" in target:
-        selected_vm = None
-        vm_uuid = target
+        vms_brief = [all_vms[idx]]
     else:
-        all_vms = list_vms(client, pid)
-        stop_active_spinner()
-        matched = [v for v in all_vms if v.name == target]
-        if not matched:
-            console.print(f"[red]VM '{target}' が見つかりません[/red]")
-            raise typer.Exit(code=1)
-        selected_vm = matched[0]
+        vms_brief = _resolve_vms(client, target, project_id)
 
-    if selected_vm:
-        vm_uuid = selected_vm.uuid
-
-    # VM詳細を取得
-    vm = get_vm(client, vm_uuid)
+    # 全VMの詳細を取得
+    vms_detail = _fetch_vm_details(client, vms_brief)
     stop_active_spinner()
-    extra = getattr(vm, "model_extra", {}) or {}
 
-    # 現在の構成を表示
-    console.print(f"\n[bold]{vm.name}[/bold] の現在の構成:")
-    console.print(f"  状態:     {vm.status}")
-    console.print(f"  パック:   {extra.get('pack_type', 'cpu')} x {extra.get('pack_num', '?')}")
-    console.print(f"  CPU:      {extra.get('cpu', '?')}")
-    console.print(f"  メモリ:   {extra.get('memory', '?')}")
-    disks = extra.get("hard_disks", [])
-    for d in disks:
+    if not vms_detail:
+        console.print("[red]構成変更可能なVMがありません（詳細取得が全て失敗しました）[/red]")
+        raise typer.Exit(code=1)
+
+    # 複数台なら均質性チェック
+    if len(vms_detail) > 1:
+        _check_reconfigure_homogeneity(vms_detail)
+
+    # 代表VMの現在構成を表示
+    ref = vms_detail[0]
+    ref_extra = getattr(ref, "model_extra", {}) or {}
+
+    if len(vms_detail) > 1:
+        console.print(f"\n[bold]対象VM ({len(vms_detail)}台):[/bold]")
+        for v in vms_detail:
+            console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
+        console.print(f"\n[bold]現在の構成（{ref.name} を代表として表示）:[/bold]")
+    else:
+        console.print(f"\n[bold]{ref.name}[/bold] の現在の構成:")
+
+    console.print(f"  状態:     {ref.status}")
+    console.print(f"  パック:   {ref_extra.get('pack_type', 'cpu')} x {ref_extra.get('pack_num', '?')}")
+    console.print(f"  CPU:      {ref_extra.get('cpu', '?')}")
+    console.print(f"  メモリ:   {ref_extra.get('memory', '?')}")
+    ref_disks = ref_extra.get("hard_disks", [])
+    for d in ref_disks:
         console.print(f"  ディスク: #{d.get('disk_number', '?')}: {d.get('capacity', '?')}")
 
-    # 稼働中なら停止が必要
-    if vm.status == "PowerON":
-        console.print(f"\n[yellow]構成変更にはVMの停止が必要です。[/yellow]")
-        if not questionary.confirm("VMを停止して構成変更しますか？").unsafe_ask():
+    # 稼働中VMの停止
+    running_vms = [v for v in vms_detail if v.status == "PowerON"]
+    if running_vms:
+        console.print(
+            f"\n[yellow]構成変更にはVMの停止が必要です（稼働中: {len(running_vms)}台）。[/yellow]"
+        )
+        if not questionary.confirm("停止して構成変更しますか？").unsafe_ask():
             raise typer.Abort()
-        shutdown_vm(client, vm_uuid)
-        stop_active_spinner()
-        console.print("シャットダウン中...")
-        import time
-        for _ in range(60):
-            time.sleep(5)
-            vm_check = get_vm(client, vm_uuid)
-            stop_active_spinner()
-            if vm_check.status != "PowerON":
-                console.print(f"  状態: {vm_check.status}")
-                break
+        _parallel_vm_action(
+            running_vms, lambda v: f"/api/vm/{v.uuid}/shutdown/", "シャットダウン中"
+        )
+        _wait_for_poweroff(running_vms)
+        console.print(f"  → 停止完了")
 
     # 新しい構成を入力
     console.print(f"\n[bold]新しい構成（Enterで変更なし）:[/bold]")
 
-    pack_type = extra.get("pack_type", "cpu")
-    current_pack_num = extra.get("pack_num", 3)
+    pack_type = ref_extra.get("pack_type", "cpu")
+    current_pack_num = ref_extra.get("pack_num", 3)
     if pack_type == "cpu":
         max_pack = 152
         mem_per_pack = 1.51
@@ -689,11 +805,13 @@ def reconfigure(
     if pack_type == "cpu":
         console.print(f"  → [cyan]{new_pack_num}コア / {new_total_mem:.1f}GB RAM[/cyan]")
     else:
-        console.print(f"  → [cyan]{new_pack_num * 18}コア / {new_pack_num}GPU / {new_total_mem:.1f}GB RAM[/cyan]")
+        console.print(
+            f"  → [cyan]{new_pack_num * 18}コア / {new_pack_num}GPU / {new_total_mem:.1f}GB RAM[/cyan]"
+        )
 
-    # ディスクサイズ変更
-    new_disks = []
-    for d in disks:
+    # ディスク新容量（代表VMの各ディスク分を聞き、全VMに同一適用）
+    new_capacities: list[int] = []
+    for d in ref_disks:
         current_cap = d.get("capacity", "").replace(" GB", "").strip()
         try:
             current_cap_int = int(float(current_cap))
@@ -703,57 +821,87 @@ def reconfigure(
             f"ディスク #{d.get('disk_number', '?')} (GB):",
             default=str(current_cap_int),
         ).unsafe_ask())
-        new_disks.append({
-            "disk_number": d.get("disk_number", 1),
-            "device_key": d.get("device_key", 2000),
-            "capacity": new_cap,
-        })
-
-    # ネットワーク（現在の構成をそのまま維持）
-    nets = extra.get("service_networks", [])
-    network_adapters = []
-    segments = list_segments(client, pid)
-    stop_active_spinner()
-    default_seg = segments[0].uuid if segments else ""
-    for n in nets:
-        seg_name = n.get("segment", "")
-        seg_uuid = default_seg
-        for s in segments:
-            if s.name == seg_name:
-                seg_uuid = s.uuid
-                break
-        network_adapters.append({
-            "adapter_number": n.get("adapter_number", 1),
-            "segment": seg_uuid,
-        })
-    if not network_adapters:
-        network_adapters = [{"adapter_number": 1, "segment": default_seg}]
+        new_capacities.append(new_cap)
 
     # 確認
     console.print(f"\n[bold]変更内容:[/bold]")
-    console.print(f"  パック: {pack_type} x {current_pack_num} → {new_pack_num}")
-    for d_old, d_new in zip(disks, new_disks):
+    console.print(
+        f"  パック: {pack_type} x {current_pack_num} → {new_pack_num}"
+    )
+    for d_old, new_cap in zip(ref_disks, new_capacities):
         old_cap = d_old.get("capacity", "?")
-        console.print(f"  ディスク #{d_new['disk_number']}: {old_cap} → {d_new['capacity']} GB")
+        console.print(
+            f"  ディスク #{d_old.get('disk_number', '?')}: {old_cap} → {new_cap} GB"
+        )
+    if len(vms_detail) > 1:
+        console.print(f"  対象:   {len(vms_detail)}台")
 
     if not questionary.confirm("\n構成変更を実行しますか？").unsafe_ask():
         raise typer.Abort()
 
-    config = {
-        "hard_disks": new_disks,
-        "network_adapters": network_adapters,
-        "pack_num": new_pack_num,
-    }
-    task_id = reconfigure_vm(client, vm_uuid, config)
+    # VMごとに個別の config を構築（device_key と segment は各VMの現状を保持）
+    segments = list_segments(client, pid)
     stop_active_spinner()
-    console.print(f"構成変更タスク開始: {task_id}")
+    default_seg = segments[0].uuid if segments else ""
+    seg_name_to_uuid = {s.name: s.uuid for s in segments}
 
-    if not no_wait:
-        settings = Settings()
-        task = wait_for_task(client, task_id, poll_interval=settings.task_poll_interval, timeout=settings.task_poll_timeout)
+    def _build_config(vm) -> dict:
+        extra = getattr(vm, "model_extra", {}) or {}
+        disks = extra.get("hard_disks", [])
+        new_disks = []
+        for d, new_cap in zip(disks, new_capacities):
+            new_disks.append({
+                "disk_number": d.get("disk_number", 1),
+                "device_key": d.get("device_key", 2000),
+                "capacity": new_cap,
+            })
+        network_adapters = []
+        for n in extra.get("service_networks", []):
+            network_adapters.append({
+                "adapter_number": n.get("adapter_number", 1),
+                "segment": seg_name_to_uuid.get(n.get("segment", ""), default_seg),
+            })
+        if not network_adapters:
+            network_adapters = [{"adapter_number": 1, "segment": default_seg}]
+        return {
+            "hard_disks": new_disks,
+            "network_adapters": network_adapters,
+            "pack_num": new_pack_num,
+        }
+
+    # 単一台 or 複数台で分岐
+    if len(vms_detail) == 1:
+        task_id = reconfigure_vm(client, vms_detail[0].uuid, _build_config(vms_detail[0]))
         stop_active_spinner()
-        status_style = "[green]" if task.status.value == "Completed" else "[red]"
-        console.print(f"  {status_style}タスク完了: {task.status.value}[/]")
+        console.print(f"構成変更タスク開始: {task_id}")
+        task_ids = [task_id]
+    else:
+        results = _parallel_vm_action(
+            vms_detail,
+            lambda v: f"/api/vm/{v.uuid}/reconfigure/",
+            "構成変更中",
+            json_fn=_build_config,
+        )
+        task_ids = []
+        for v, r in zip(vms_detail, results):
+            if isinstance(r, Exception):
+                console.print(f"  [red]✗[/red] {v.name} → {r}")
+                continue
+            tid = r.get("task_id", "") if isinstance(r, dict) else ""
+            if isinstance(tid, list):
+                tid = tid[0] if tid else ""
+            if tid:
+                task_ids.append(tid)
+                console.print(f"  [green]✓[/green] {v.name} → タスク: {tid}")
+        console.print(f"\n{len(task_ids)}台の構成変更を開始しました")
+
+    if not no_wait and task_ids:
+        task_results = _parallel_task_wait(task_ids)
+        for data in task_results:
+            obj_name = data.get("object_name", "?")
+            status = data.get("status", "?")
+            style = "[green]" if status == "Completed" else "[red]"
+            console.print(f"  {style}{obj_name}: {status}[/]")
 
 
 @app.command()
@@ -784,25 +932,7 @@ def destroy(
     if running_vms:
         _parallel_vm_action(running_vms, lambda v: f"/api/vm/{v.uuid}/power_off/", "停止中")
         console.print(f"  {len(running_vms)}台の停止リクエスト送信完了")
-
-        # 全VMがPowerOFFになるまで並列ポーリング
-        import asyncio
-        token, base_url = _get_token_and_base()
-        settings = Settings()
-
-        async def _wait_poweroff():
-            resolved = base_url if base_url.endswith("/") else base_url + "/"
-            async with httpx.AsyncClient(base_url=resolved, timeout=settings.request_timeout, headers={"Authorization": f"JWT {token}"}) as ac:
-                async def _poll(vid):
-                    for _ in range(60):
-                        resp = await ac.get(f"/api/vm/{vid}/")
-                        if resp.json().get("status") != "PowerON":
-                            return
-                        await asyncio.sleep(5)
-                await asyncio.gather(*[_poll(v.uuid) for v in running_vms])
-
-        import httpx as httpx_mod
-        asyncio.run(_wait_poweroff())
+        _wait_for_poweroff(running_vms)
         console.print(f"  → 停止完了")
         console.print("")
 

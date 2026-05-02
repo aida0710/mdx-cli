@@ -4,7 +4,7 @@ import httpx
 import pytest
 import respx
 
-from mdx_cli.api.parallel import parallel_get
+from mdx_cli.api.parallel import parallel_get, parallel_wait
 
 
 @respx.mock
@@ -82,3 +82,106 @@ def test_parallel_get_preserves_order():
     )
     assert results[0]["uuid"] == "vm-1"
     assert results[1]["uuid"] == "vm-2"
+
+
+@respx.mock
+def test_parallel_get_404_is_retried():
+    """404 もリトライ対象（サーバー負荷時の一時エラーとして扱う）。"""
+    # 1回目404 → 2回目200で成功
+    respx.get("https://oprpl.mdx.jp/api/vm/vm-flaky/").mock(
+        side_effect=[
+            httpx.Response(404),
+            httpx.Response(200, json={"uuid": "vm-flaky"}),
+        ]
+    )
+    # RETRY_BACKOFFを短くしてテストを速く
+    with patch("mdx_cli.api.parallel.RETRY_BACKOFF", [0, 0, 0]):
+        results = parallel_get(
+            base_url="https://oprpl.mdx.jp",
+            token="test-token",
+            paths=["/api/vm/vm-flaky/"],
+        )
+    assert results[0]["uuid"] == "vm-flaky"
+
+
+@respx.mock
+def test_parallel_get_return_exceptions_partial_failure():
+    """return_exceptions=True で部分失敗があっても全体は止まらない。"""
+    respx.get("https://oprpl.mdx.jp/api/vm/vm-1/").mock(
+        return_value=httpx.Response(200, json={"uuid": "vm-1"})
+    )
+    respx.get("https://oprpl.mdx.jp/api/vm/vm-bad/").mock(
+        return_value=httpx.Response(500)
+    )
+    respx.get("https://oprpl.mdx.jp/api/vm/vm-2/").mock(
+        return_value=httpx.Response(200, json={"uuid": "vm-2"})
+    )
+    with patch("mdx_cli.api.parallel.RETRY_BACKOFF", [0, 0, 0]):
+        results = parallel_get(
+            base_url="https://oprpl.mdx.jp",
+            token="test-token",
+            paths=["/api/vm/vm-1/", "/api/vm/vm-bad/", "/api/vm/vm-2/"],
+            return_exceptions=True,
+        )
+    assert len(results) == 3
+    assert results[0]["uuid"] == "vm-1"
+    assert isinstance(results[1], httpx.HTTPStatusError)
+    assert results[2]["uuid"] == "vm-2"
+
+
+@respx.mock
+def test_parallel_get_default_raises_on_persistent_failure():
+    """return_exceptions=False（デフォルト）なら例外がraiseされる。"""
+    import pytest
+    respx.get("https://oprpl.mdx.jp/api/vm/vm-bad/").mock(
+        return_value=httpx.Response(500)
+    )
+    with patch("mdx_cli.api.parallel.RETRY_BACKOFF", [0, 0, 0]):
+        with pytest.raises(httpx.HTTPStatusError):
+            parallel_get(
+                base_url="https://oprpl.mdx.jp",
+                token="test-token",
+                paths=["/api/vm/vm-bad/"],
+            )
+
+
+@respx.mock
+def test_parallel_wait_retries_on_404():
+    """初回 404 でもリトライして最終的に成功すれば結果を返す。
+
+    deploy 直後の task_id は サーバー側の登録が遅延して 404 になることがある。
+    並行プロセスが refresh するとさらに発生しやすい。
+    """
+    respx.get("https://oprpl.mdx.jp/api/task/task-1/").mock(
+        side_effect=[
+            httpx.Response(404),
+            httpx.Response(404),
+            httpx.Response(200, json={"status": "Completed", "object_name": "vm-1"}),
+        ]
+    )
+    results = parallel_wait(
+        base_url="https://oprpl.mdx.jp",
+        token="test-token",
+        task_ids=["task-1"],
+        poll_interval=0,
+        timeout=10,
+    )
+    assert len(results) == 1
+    assert results[0]["status"] == "Completed"
+
+
+@respx.mock
+def test_parallel_wait_404_eventually_returns_unknown():
+    """404 が一定回数続いたら諦めてエラーなく抜ける（無限ループ防止）。"""
+    respx.get("https://oprpl.mdx.jp/api/task/task-bad/").mock(
+        return_value=httpx.Response(404)
+    )
+    results = parallel_wait(
+        base_url="https://oprpl.mdx.jp",
+        token="test-token",
+        task_ids=["task-bad"],
+        poll_interval=0,
+        timeout=1,
+    )
+    # エラーなく結果が返る（status は不明）
+    assert len(results) == 1

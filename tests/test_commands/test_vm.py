@@ -74,6 +74,120 @@ def test_vm_start_pattern():
                     mock_action.assert_called_once()
 
 
+# --- reconfigure 均質性チェック ---
+
+
+def _make_vm_with_details(name="vm-1", pack_type="cpu", pack_num=4, disk_count=1):
+    from mdx_cli.models.vm import VM
+    extra_data = {
+        "pack_type": pack_type,
+        "pack_num": pack_num,
+        "hard_disks": [
+            {"disk_number": i + 1, "device_key": 2000 + i, "capacity": "40 GB"}
+            for i in range(disk_count)
+        ],
+    }
+    return VM.model_validate({
+        "uuid": f"uuid-{name}",
+        "name": name,
+        "status": "PowerON",
+        "service_level": "スポット仮想マシン",
+        **extra_data,
+    })
+
+
+def test_check_reconfigure_homogeneity_uniform_ok():
+    """全VMが同じpack_type・同じディスク数なら OK。"""
+    from mdx_cli.commands.vm import _check_reconfigure_homogeneity
+    vms = [
+        _make_vm_with_details("vm-1", pack_type="cpu", disk_count=2),
+        _make_vm_with_details("vm-2", pack_type="cpu", disk_count=2),
+        _make_vm_with_details("vm-3", pack_type="cpu", disk_count=2),
+    ]
+    _check_reconfigure_homogeneity(vms)  # 例外が出なければOK
+
+
+def test_check_reconfigure_homogeneity_pack_type_mismatch():
+    """pack_type が混在したら typer.Exit。"""
+    import typer
+    import pytest
+    from mdx_cli.commands.vm import _check_reconfigure_homogeneity
+    vms = [
+        _make_vm_with_details("vm-1", pack_type="cpu"),
+        _make_vm_with_details("vm-2", pack_type="gpu"),
+    ]
+    with pytest.raises(typer.Exit):
+        _check_reconfigure_homogeneity(vms)
+
+
+def test_check_reconfigure_homogeneity_disk_count_mismatch():
+    """ディスク本数が混在したら typer.Exit。"""
+    import typer
+    import pytest
+    from mdx_cli.commands.vm import _check_reconfigure_homogeneity
+    vms = [
+        _make_vm_with_details("vm-1", disk_count=1),
+        _make_vm_with_details("vm-2", disk_count=2),
+    ]
+    with pytest.raises(typer.Exit):
+        _check_reconfigure_homogeneity(vms)
+
+
+def test_vm_reconfigure_all_details_failed_exits():
+    """詳細取得が全て失敗したら typer.Exit(1) で抜ける（IndexError 防止）。"""
+    vms_brief = [
+        _make_vm("worker-0", "uuid-0"),
+        _make_vm("worker-1", "uuid-1"),
+    ]
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms_brief):
+        with patch("mdx_cli.commands.vm._fetch_vm_details", return_value=[]):
+            with patch("mdx_cli.commands.vm.get_client"):
+                with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                    result = runner.invoke(app, [
+                        "reconfigure", "worker-*", "-p", "proj-1", "--no-wait",
+                    ])
+                    assert result.exit_code == 1
+                    assert "構成変更可能なVMがありません" in result.output
+
+
+def test_vm_reconfigure_pattern_matches_multiple_vms():
+    """パターン指定で複数台マッチ → _parallel_vm_action で一括reconfigure。"""
+    vms_brief = [
+        _make_vm("worker-0", "uuid-0", status="PowerOFF"),
+        _make_vm("worker-1", "uuid-1", status="PowerOFF"),
+        _make_vm("worker-2", "uuid-2", status="PowerOFF"),
+    ]
+    vms_detail = [
+        _make_vm_with_details("worker-0", pack_type="cpu", pack_num=4, disk_count=1),
+        _make_vm_with_details("worker-1", pack_type="cpu", pack_num=4, disk_count=1),
+        _make_vm_with_details("worker-2", pack_type="cpu", pack_num=4, disk_count=1),
+    ]
+    # 詳細取得時に status を PowerOFF に（稼働中処理を回避）
+    for v in vms_detail:
+        v.status = "PowerOFF"
+
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms_brief):
+        with patch("mdx_cli.commands.vm._fetch_vm_details", return_value=vms_detail):
+            with patch("mdx_cli.commands.vm.list_segments", return_value=[_make_segment()]):
+                with patch("mdx_cli.commands.vm._parallel_vm_action", return_value=[
+                    {"task_id": "task-0"}, {"task_id": "task-1"}, {"task_id": "task-2"}
+                ]) as mock_action:
+                    with patch("mdx_cli.commands.vm.get_client"):
+                        with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                            with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                                mock_q.text.return_value.unsafe_ask.side_effect = ["8", "40"]
+                                mock_q.confirm.return_value.unsafe_ask.return_value = True
+                                result = runner.invoke(app, [
+                                    "reconfigure", "worker-*",
+                                    "-p", "proj-1", "--no-wait",
+                                ])
+                                assert result.exit_code == 0, result.output
+                                mock_action.assert_called_once()
+                                # action_name は "構成変更中"
+                                args = mock_action.call_args
+                                assert args[0][2] == "構成変更中"
+
+
 def test_vm_destroy_single():
     """UUID指定で1台削除（停止済み）"""
     vm = _make_vm(status="PowerOFF")
