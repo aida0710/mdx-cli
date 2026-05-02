@@ -44,6 +44,36 @@ def test_history_entry_partial_fields():
     assert entry.user_name == ""
 
 
+def test_history_entry_null_fields_allowed():
+    """APIから null が返ってくるフィールドも受け入れる（実行中タスクは end_datetime が null）。"""
+    data = {
+        "type": "デプロイ",
+        "start_datetime": "2026-04-14 16:34:13",
+        "end_datetime": None,
+        "status": "Running",
+        "user_name": "testuser",
+        "object_name": "my-vm",
+    }
+    entry = HistoryEntry.model_validate(data)
+    assert entry.end_datetime == ""
+    assert entry.status == "Running"
+
+
+def test_history_entry_all_nulls():
+    """全フィールドが null でも空文字として扱う。"""
+    data = {
+        "type": None,
+        "start_datetime": None,
+        "end_datetime": None,
+        "status": None,
+        "user_name": None,
+        "object_name": None,
+    }
+    entry = HistoryEntry.model_validate(data)
+    assert entry.type == ""
+    assert entry.end_datetime == ""
+
+
 def test_history_entry_extra_fields_allowed():
     """未知フィールドがあってもエラーにならない（extra='allow'）"""
     data = {

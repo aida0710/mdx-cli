@@ -75,3 +75,66 @@ def test_prompt_int_out_of_range_then_valid(mocker):
     result = prompt_int("番号を入力:", max_val=5)
     assert result == 3
     assert mock_q.text.return_value.unsafe_ask.call_count == 2
+
+
+# --- get_client: 期限が近いトークンの事前リフレッシュ ---
+
+
+def test_get_client_refreshes_token_if_near_expiry():
+    """トークンの期限が近ければ自動リフレッシュして新トークンを使う。"""
+    from mdx_cli.commands._common import get_client
+
+    with patch("mdx_cli.commands._common.CredentialStore") as MockStore:
+        store = MockStore.return_value
+        store.load_token.return_value = "old-jwt"
+        with patch("mdx_cli.commands._common.token_needs_refresh", return_value=True):
+            with patch("mdx_cli.commands._common.refresh_saved_token", return_value="new-jwt") as mock_refresh:
+                with patch("mdx_cli.commands._common.create_client") as mock_create:
+                    get_client()
+                    mock_refresh.assert_called_once()
+                    # create_client は新トークンで呼ばれる
+                    mock_create.assert_called_once()
+                    assert mock_create.call_args.kwargs["token"] == "new-jwt"
+
+
+def test_get_client_skips_refresh_if_token_valid():
+    """トークンがまだ有効ならリフレッシュしない。"""
+    from mdx_cli.commands._common import get_client
+
+    with patch("mdx_cli.commands._common.CredentialStore") as MockStore:
+        store = MockStore.return_value
+        store.load_token.return_value = "valid-jwt"
+        with patch("mdx_cli.commands._common.token_needs_refresh", return_value=False):
+            with patch("mdx_cli.commands._common.refresh_saved_token") as mock_refresh:
+                with patch("mdx_cli.commands._common.create_client") as mock_create:
+                    get_client()
+                    mock_refresh.assert_not_called()
+                    assert mock_create.call_args.kwargs["token"] == "valid-jwt"
+
+
+def test_get_client_no_token_skips_refresh():
+    """トークン未保存時はリフレッシュしない。"""
+    from mdx_cli.commands._common import get_client
+
+    with patch("mdx_cli.commands._common.CredentialStore") as MockStore:
+        store = MockStore.return_value
+        store.load_token.return_value = None
+        with patch("mdx_cli.commands._common.refresh_saved_token") as mock_refresh:
+            with patch("mdx_cli.commands._common.create_client") as mock_create:
+                get_client()
+                mock_refresh.assert_not_called()
+                assert mock_create.call_args.kwargs["token"] is None
+
+
+def test_get_client_uses_old_token_if_refresh_fails():
+    """リフレッシュ失敗時は既存トークンで続行（MDXAuthの401対応が保険）。"""
+    from mdx_cli.commands._common import get_client
+
+    with patch("mdx_cli.commands._common.CredentialStore") as MockStore:
+        store = MockStore.return_value
+        store.load_token.return_value = "stale-jwt"
+        with patch("mdx_cli.commands._common.token_needs_refresh", return_value=True):
+            with patch("mdx_cli.commands._common.refresh_saved_token", return_value=None):
+                with patch("mdx_cli.commands._common.create_client") as mock_create:
+                    get_client()
+                    assert mock_create.call_args.kwargs["token"] == "stale-jwt"

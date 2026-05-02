@@ -13,7 +13,7 @@ from mdx_cli.settings import Settings
 
 logger = logging.getLogger("mdx_cli")
 
-MAX_CONCURRENT_GET = 50
+MAX_CONCURRENT_GET = 30
 MAX_CONCURRENT_POST = 5
 MAX_RETRIES = 3
 RETRY_BACKOFF = [1, 2, 4]  # 秒
@@ -37,6 +37,11 @@ async def _fetch_one(
     index: int,
     on_progress: Callable[[int], None] | None,
 ) -> dict:
+    """1つのGETを実行する（リトライ付き）。
+
+    404 もリトライ対象。サーバー負荷時は一覧に存在するリソースの詳細が
+    一時的に 404 で返ることがあるため、確定エラーとして扱わない。
+    """
     async with semaphore:
         for attempt in range(MAX_RETRIES):
             try:
@@ -60,8 +65,13 @@ def parallel_get(
     paths: list[str],
     max_concurrent: int = MAX_CONCURRENT_GET,
     on_progress: Callable[[int], None] | None = None,
+    return_exceptions: bool = False,
 ) -> list[dict]:
-    """複数のGET APIを並列に取得する。"""
+    """複数のGET APIを並列に取得する。
+
+    return_exceptions=True にすると、失敗したリクエストはExceptionオブジェクトとして
+    結果に含まれ、全体は止まらない（caller側で例外処理する）。
+    """
     settings = Settings()
 
     async def _run():
@@ -71,7 +81,7 @@ def parallel_get(
                 _fetch_one(client, path, semaphore, i, on_progress)
                 for i, path in enumerate(paths)
             ]
-            return await asyncio.gather(*tasks)
+            return await asyncio.gather(*tasks, return_exceptions=return_exceptions)
 
     return list(asyncio.run(_run()))
 
@@ -141,13 +151,29 @@ async def _wait_one(
     timeout: int,
     on_done: Callable[[str, dict], None] | None,
 ) -> dict:
+    """1つのタスクをポーリングして完了を待つ。
+
+    deploy 直後の task_id はサーバー側登録の遅延で 404 を返すことがある
+    （並行プロセスが refresh するとさらに発生しやすい）。
+    404 は一時エラーとして扱い、リトライを続ける（タイムアウトで諦める）。
+    """
     async with semaphore:
         import time
         start = time.monotonic()
+        last_data: dict = {}
         while True:
             resp = await client.get(f"/api/task/{task_id}/")
+            if resp.status_code == 404:
+                # タスクがまだ登録されてない or トークン競合 → リトライ
+                if time.monotonic() - start >= timeout:
+                    if on_done:
+                        on_done(task_id, last_data)
+                    return last_data
+                await asyncio.sleep(poll_interval)
+                continue
             resp.raise_for_status()
             data = resp.json()
+            last_data = data
             status = data.get("status", "")
             if status in ("Completed", "Failed"):
                 if on_done:

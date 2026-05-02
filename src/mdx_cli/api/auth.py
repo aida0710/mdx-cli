@@ -1,10 +1,62 @@
+import base64
+import json
 import logging
+import time
 from pathlib import Path
 from typing import Callable, Generator
 
 import httpx
 
 logger = logging.getLogger("mdx_cli")
+
+
+def decode_jwt_exp(token: str) -> int | None:
+    """JWTの exp claim（期限切れunix時刻）を取り出す。
+
+    パースに失敗した場合は None を返す（壊れたトークンは reactive refresh に任せる）。
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        payload_b64 = parts[1]
+        padding = (-len(payload_b64)) % 4
+        payload_bytes = base64.urlsafe_b64decode(payload_b64 + "=" * padding)
+        payload = json.loads(payload_bytes)
+        exp = payload.get("exp")
+        return int(exp) if exp is not None else None
+    except Exception:
+        return None
+
+
+def token_needs_refresh(token: str, threshold_seconds: int = 900) -> bool:
+    """トークンの期限が threshold_seconds 以内なら True。
+
+    デコード失敗時は False を返し、MDXAuth の reactive refresh に任せる。
+    """
+    exp = decode_jwt_exp(token)
+    if exp is None:
+        return False
+    return exp - time.time() < threshold_seconds
+
+
+def refresh_saved_token(token: str, base_url: str, timeout: int = 30) -> str | None:
+    """/api/refresh/ を叩いて新トークンを取得する。
+
+    失敗時は None を返す（例外は投げない）。
+    """
+    try:
+        with httpx.Client(
+            base_url=base_url,
+            timeout=timeout,
+            transport=httpx.HTTPTransport(local_address="0.0.0.0"),
+        ) as client:
+            resp = client.post("/api/refresh/", json={"token": token})
+            if resp.status_code == 200:
+                return resp.json().get("token")
+    except Exception as e:
+        logger.debug("トークンリフレッシュに失敗: %s", e)
+    return None
 
 
 class MDXAuth(httpx.Auth):
