@@ -80,22 +80,33 @@ def summary_cmd(
     # ストレージ情報
     st_extra = getattr(storage, "model_extra", {}) or {}
 
+    def _parse_quota_value(value) -> tuple[int, bool]:
+        """quota 値をパース。末尾 `*` はソフトリミット超過マーカー。"""
+        if isinstance(value, (int, float)):
+            return int(value), False
+        s = str(value).strip()
+        exceeded = s.endswith("*")
+        if exceeded:
+            s = s.rstrip("*")
+        return (int(s) if s else 0), exceeded
+
     def _format_storage(label: str, data: dict) -> None:
         if not data:
             return
-        kb_used = int(data.get("kbytes", 0))
-        kb_limit = int(data.get("kbytes_limit", 0))
+        kb_used, used_exceeded = _parse_quota_value(data.get("kbytes", 0))
+        kb_limit, _ = _parse_quota_value(data.get("kbytes_limit", 0))
         fs = data.get("filesystem", "")
+        warning = " [bold red]⚠ クオータ超過[/bold red]" if used_exceeded else ""
         if kb_limit > 0:
             gb_used = kb_used / 1024 / 1024
             gb_limit = kb_limit / 1024 / 1024
             gb_free = gb_limit - gb_used
             pct = (kb_used / kb_limit) * 100 if kb_limit else 0
-            console.print(f"\n[bold]{label}:[/bold] [dim]{fs}[/dim]")
+            console.print(f"\n[bold]{label}:[/bold] [dim]{fs}[/dim]{warning}")
             console.print(f"  使用: {gb_used:,.1f} GB / {gb_limit:,.1f} GB（残り {gb_free:,.1f} GB, {pct:.1f}%）")
         elif kb_used > 0:
             gb_used = kb_used / 1024 / 1024
-            console.print(f"\n[bold]{label}:[/bold] [dim]{fs}[/dim]")
+            console.print(f"\n[bold]{label}:[/bold] [dim]{fs}[/dim]{warning}")
             console.print(f"  使用: {gb_used:,.1f} GB")
 
     _format_storage("高速ストレージ", st_extra.get("high_speed_storage", {}))

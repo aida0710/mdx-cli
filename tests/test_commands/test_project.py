@@ -55,6 +55,75 @@ def test_project_summary():
                     assert "3" in result.output  # total VM count
 
 
+def _summary_overview_fixture() -> dict:
+    return {
+        "spot_vm": {"power_on": 0, "power_off": 0, "deallocated": 0, "total": 0},
+        "guarantee_vm": {"power_on": 0, "power_off": 0, "deallocated": 0, "total": 0},
+        "resource": {
+            "disk_size": {"used": 0, "unused": 0},
+            "cpu_pack": {"used": 0, "unused": 0},
+            "gpu_pack": {"used": 0, "unused": 0},
+        },
+    }
+
+
+def test_project_summary_handles_quota_exceed_marker():
+    """kbytes に Lustre quota の超過マーカー `*` が付いていてもクラッシュしない"""
+    overview = _summary_overview_fixture()
+    storage = StorageInfo.model_validate({
+        "object_storage": {
+            "filesystem": "/object",
+            "kbytes": "2097152019244*",  # 末尾 * = ソフトリミット超過
+            "kbytes_limit": "2097152000000",
+        },
+    })
+    with patch("mdx_cli.commands.project.get_project_overview", return_value=overview), \
+         patch("mdx_cli.commands.project.get_project_storage", return_value=storage), \
+         patch("mdx_cli.commands.project.get_client"), \
+         patch("mdx_cli.commands.project.resolve_project_id", return_value="proj-1"):
+        result = runner.invoke(app, ["summary", "--project-id", "proj-1"])
+        assert result.exit_code == 0, result.output
+        assert "オブジェクトストレージ" in result.output
+
+
+def test_project_summary_shows_quota_exceeded_warning():
+    """超過マーカー検出時、警告表示が出る"""
+    overview = _summary_overview_fixture()
+    storage = StorageInfo.model_validate({
+        "object_storage": {
+            "filesystem": "/object",
+            "kbytes": "2097152019244*",
+            "kbytes_limit": "2097152000000",
+        },
+    })
+    with patch("mdx_cli.commands.project.get_project_overview", return_value=overview), \
+         patch("mdx_cli.commands.project.get_project_storage", return_value=storage), \
+         patch("mdx_cli.commands.project.get_client"), \
+         patch("mdx_cli.commands.project.resolve_project_id", return_value="proj-1"):
+        result = runner.invoke(app, ["summary", "--project-id", "proj-1"])
+        assert result.exit_code == 0, result.output
+        assert "クオータ超過" in result.output
+
+
+def test_project_summary_no_warning_when_not_exceeded():
+    """通常の数値（マーカーなし）には警告を出さない"""
+    overview = _summary_overview_fixture()
+    storage = StorageInfo.model_validate({
+        "high_speed_storage": {
+            "filesystem": "/fast",
+            "kbytes": "178519040",
+            "kbytes_limit": "838860800",
+        },
+    })
+    with patch("mdx_cli.commands.project.get_project_overview", return_value=overview), \
+         patch("mdx_cli.commands.project.get_project_storage", return_value=storage), \
+         patch("mdx_cli.commands.project.get_client"), \
+         patch("mdx_cli.commands.project.resolve_project_id", return_value="proj-1"):
+        result = runner.invoke(app, ["summary", "--project-id", "proj-1"])
+        assert result.exit_code == 0, result.output
+        assert "クオータ超過" not in result.output
+
+
 def test_project_select():
     org = Project(uuid="org-1", name="Org 1", description="")
     # Attach nested projects via model_extra
