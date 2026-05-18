@@ -19,6 +19,7 @@ from mdx_cli.api.parallel import parallel_get
 from mdx_cli.api.spinner import _console as spin_console, stop_active_spinner
 from mdx_cli.commands._common import get_client, resolve_project_id, resolve_segment_id
 from mdx_cli.credentials.store import CredentialStore
+from mdx_cli.models.network import ACL
 from mdx_cli.output.formatting import console, render
 from mdx_cli.output.tables import SEGMENT_COLUMNS, SEGMENT_SUMMARY_COLUMNS
 from mdx_cli.settings import Settings
@@ -95,6 +96,59 @@ def _collect_vm_ip_maps(client, pid: str, json_mode: bool) -> VmIpMaps:
 def _is_host_mask(mask: str) -> bool:
     """単一ホスト指定のマスクか（255.255.255.255 / 32 / /32 形式に対応）。"""
     return mask.strip().lstrip("/") in ("255.255.255.255", "32")
+
+
+def _collect_segment_acls(client, segments, json_mode: bool) -> list[list]:
+    """各セグメントのACLを並列取得する（進捗表示付き）。
+
+    戻り値は segments と同じ順序の ACL リストのリスト。
+    100件超でページネーション継続があるセグメントは fetch_all で取り直す。
+    取得に失敗したセグメントは空リストになる。
+    """
+    if not segments:
+        return []
+    settings = Settings()
+    store = CredentialStore(config_dir=settings.config_dir)
+    token = store.load_token() or ""
+
+    status_display = Status("", console=spin_console, spinner="dots") if not json_mode else None
+    if status_display:
+        status_display.start()
+    done = 0
+
+    def on_progress(idx: int) -> None:
+        nonlocal done
+        done += 1
+        if status_display:
+            status_display.update(f"ACL取得中... ({done}/{len(segments)})")
+
+    paths = [f"/api/acl/segment/{s.uuid}/?page_size=100" for s in segments]
+    results = parallel_get(
+        settings.base_url, token, paths,
+        on_progress=on_progress, return_exceptions=True,
+    )
+    if status_display:
+        status_display.stop()
+
+    acl_lists: list[list] = []
+    needs_full: list[int] = []
+    for i, raw in enumerate(results):
+        if isinstance(raw, Exception):
+            acl_lists.append([])
+            continue
+        if isinstance(raw, dict):
+            acl_lists.append([ACL.model_validate(x) for x in raw.get("results", [])])
+            if raw.get("next"):
+                needs_full.append(i)
+        elif isinstance(raw, list):
+            acl_lists.append([ACL.model_validate(x) for x in raw])
+        else:
+            acl_lists.append([])
+    # 100件超のセグメントは fetch_all で取り直し
+    for i in needs_full:
+        acl_lists[i] = list_acls(client, segments[i].uuid)
+        stop_active_spinner()
+    return acl_lists
 
 
 @segment_app.command("list")
@@ -248,12 +302,12 @@ def check_acl(
     segments = list_segments(client, pid)
     stop_active_spinner()
 
+    acl_lists = _collect_segment_acls(client, segments, json_mode)
+
     # セグメントごとにACLを分類: [(segment, [(acl, status, vm_name), ...]), ...]
     seg_results: list = []
     holes: list = []  # (segment, acl) — 穴
-    for seg in segments:
-        acls = list_acls(client, seg.uuid)
-        stop_active_spinner()
+    for seg, acls in zip(segments, acl_lists):
         classified: list = []
         for acl in acls:
             if not acl.dst_address.startswith(_INTERNAL_IP_PREFIX):
