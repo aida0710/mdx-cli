@@ -74,3 +74,26 @@ def test_collect_vm_ip_maps_detects_partial_failure():
         maps = _collect_vm_ip_maps(None, "proj-1", json_mode=True)
     assert maps.partial_failure is True
     assert maps.private_ip_to_vm == {}
+
+
+def test_check_ip_table_output():
+    """check-ip 表示の特性化テスト（リファクタ前の挙動を固定）"""
+    with patch("mdx_cli.commands.network.list_assignable_ips", return_value=["203.0.113.22"]), \
+         patch("mdx_cli.commands.network.list_dnats", return_value=[
+             DNAT(uuid="d-1", pool_address="203.0.113.10", segment="s", dst_address="10.15.0.5")
+         ]), \
+         patch("mdx_cli.commands.network.list_vms", return_value=[
+             VM(uuid="vm-1", name="web-1", status="PowerON")
+         ]), \
+         patch("mdx_cli.commands.network.parallel_get", return_value=[
+             {"service_networks": [{"global_ip": "203.0.113.11", "ipv4_address": ["10.15.0.5"]}]}
+         ]), \
+         patch("mdx_cli.commands.network.get_client"), \
+         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"):
+        result = runner.invoke(app, ["check-ip", "--project-id", "proj-1"])
+    assert result.exit_code == 0, result.output
+    assert "203.0.113.11" in result.output  # VM割当IP
+    assert "203.0.113.10" in result.output  # DNAT IP
+    assert "203.0.113.22" in result.output  # 未使用IP
+    assert "web-1" in result.output

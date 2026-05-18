@@ -138,8 +138,6 @@ def check_ip(
     json_mode: bool = typer.Option(False, "--json", help="JSON出力"),
 ) -> None:
     """グローバルIPv4の使用状況を確認"""
-    import json
-
     pid = resolve_project_id(project_id)
     client = get_client(silent=json_mode)
 
@@ -150,55 +148,20 @@ def check_ip(
     # DNAT で使用中のIP
     dnats = list_dnats(client, pid)
     stop_active_spinner()
-    dnat_map: dict[str, str] = {}
-    for d in dnats:
-        dnat_map[d.pool_address] = f"DNAT → {d.dst_address}"
 
-    # VM に直接割当されているIP（並列取得）
-    vms = list_vms(client, pid)
-    stop_active_spinner()
-    active_vms = [v for v in vms if v.status != "Deallocated"]
-
-    from mdx_cli.api.parallel import parallel_get
-    from mdx_cli.api.spinner import _console as spin_console
-    from mdx_cli.credentials.store import CredentialStore
-    from rich.status import Status
-
-    status_display = Status("", console=spin_console, spinner="dots") if not json_mode else None
-    if status_display:
-        status_display.start()
-    done_count = 0
-
-    def on_progress(idx: int) -> None:
-        nonlocal done_count
-        done_count += 1
-        if status_display:
-            status_display.update(f"VM詳細を取得中... ({done_count}/{len(active_vms)})")
-
-    settings = Settings()
-    store = CredentialStore(config_dir=settings.config_dir)
-    token = store.load_token() or ""
-    paths = [f"/api/vm/{v.uuid}/" for v in active_vms]
-    results = parallel_get(settings.base_url, token, paths, max_concurrent=50, on_progress=on_progress)
-    if status_display:
-        status_display.stop()
-
-    vm_map: dict[str, str] = {}
-    private_ip_to_vm: dict[str, str] = {}
-    for v, data in zip(active_vms, results):
-        for net in data.get("service_networks", []):
-            gip = net.get("global_ip", "")
-            if gip:
-                vm_map[gip] = f"VM: {v.name}"
-            for pip in net.get("ipv4_address", []):
-                private_ip_to_vm[pip] = v.name
+    # VM に直接割当されているIP
+    vm_maps = _collect_vm_ip_maps(client, pid, json_mode)
+    vm_map = vm_maps.global_ip_to_vm
+    private_ip_to_vm = vm_maps.private_ip_to_vm
 
     # DNATの宛先IPからVM名を逆引き
-    for pool_addr, label in list(dnat_map.items()):
-        dst = label.split("→ ")[-1].strip()
-        vm_name = private_ip_to_vm.get(dst, "")
+    dnat_map: dict[str, str] = {}
+    for d in dnats:
+        vm_name = private_ip_to_vm.get(d.dst_address, "")
         if vm_name:
-            dnat_map[pool_addr] = f"DNAT → {dst} ({vm_name})"
+            dnat_map[d.pool_address] = f"DNAT → {d.dst_address} ({vm_name})"
+        else:
+            dnat_map[d.pool_address] = f"DNAT → {d.dst_address}"
 
     # 全IP を集約
     all_ips = sorted(assignable | set(dnat_map.keys()) | set(vm_map.keys()))

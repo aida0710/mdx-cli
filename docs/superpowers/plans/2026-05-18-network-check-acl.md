@@ -259,10 +259,10 @@ def test_check_ip_table_output():
     assert "web-1" in result.output
 ```
 
-- [ ] **Step 2: テストを実行して成功を確認（特性化テスト）**
+- [ ] **Step 2: テストを実行して失敗を確認**
 
 Run: `uv run pytest tests/test_commands/test_network.py::test_check_ip_table_output -v`
-Expected: PASS（リファクタ前の現状コードで通る）
+Expected: FAIL（現状 check-ip は `parallel_get` を関数内importしており `mdx_cli.commands.network.parallel_get` のモックが効かず、実APIアクセスで401）。Step 3のリファクタで `_collect_vm_ip_maps`（トップレベルimport）経由に変わりモック可能になる
 
 - [ ] **Step 3: check_ip 関数をヘルパー利用にリファクタ**
 
