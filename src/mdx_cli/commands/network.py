@@ -6,8 +6,10 @@ import typer
 from rich.status import Status
 
 from mdx_cli.api.endpoints.networks import (
+    delete_acl,
     delete_dnat,
     get_segment_summary,
+    list_acls,
     list_assignable_ips,
     list_dnats,
     list_segments,
@@ -88,6 +90,11 @@ def _collect_vm_ip_maps(client, pid: str, json_mode: bool) -> VmIpMaps:
             for pip in net.get("ipv4_address", []):
                 private_ip_to_vm[pip] = v.name
     return VmIpMaps(global_ip_to_vm, private_ip_to_vm, partial_failure)
+
+
+def _is_host_mask(mask: str) -> bool:
+    """単一ホスト指定のマスクか（255.255.255.255 / 32 / /32 形式に対応）。"""
+    return mask.strip().lstrip("/") in ("255.255.255.255", "32")
 
 
 @segment_app.command("list")
@@ -220,6 +227,103 @@ def check_ip(
                 deleted += 1
             except Exception as e:
                 console.print(f"[red]  削除失敗 {d.uuid}: {e}[/red]")
+                failed += 1
+        stop_active_spinner()
+        console.print(f"\n削除: {deleted}件  失敗: {failed}件")
+
+
+@app.command("check-acl")
+def check_acl(
+    project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID（省略時は選択済みを使用）", envvar="MDX_PROJECT_ID"),
+    json_mode: bool = typer.Option(False, "--json", help="JSON出力"),
+    fix: bool = typer.Option(False, "--fix", help="死んだVM宛のACLを削除"),
+) -> None:
+    """ACLルールのうち存在しないVM宛の「穴」を検出する"""
+    pid = resolve_project_id(project_id)
+    client = get_client(silent=json_mode)
+
+    vm_maps = _collect_vm_ip_maps(client, pid, json_mode)
+    private_ip_to_vm = vm_maps.private_ip_to_vm
+
+    segments = list_segments(client, pid)
+    stop_active_spinner()
+
+    # セグメントごとにACLを分類: [(segment, [(acl, status, vm_name), ...]), ...]
+    seg_results: list = []
+    holes: list = []  # (segment, acl) — 穴
+    for seg in segments:
+        acls = list_acls(client, seg.uuid)
+        stop_active_spinner()
+        classified: list = []
+        for acl in acls:
+            if not acl.dst_address.startswith(_INTERNAL_IP_PREFIX):
+                continue  # 対象外（Any・外部IP）は表示しない
+            if not _is_host_mask(acl.dst_mask):
+                classified.append((acl, "range", None))
+            elif acl.dst_address in private_ip_to_vm:
+                classified.append((acl, "alive", private_ip_to_vm[acl.dst_address]))
+            else:
+                classified.append((acl, "hole", None))
+                holes.append((seg, acl))
+        if classified:
+            seg_results.append((seg, classified))
+
+    if json_mode:
+        out = []
+        for seg, classified in seg_results:
+            for acl, status, vm_name in classified:
+                out.append({
+                    "segment_id": seg.uuid,
+                    "segment_name": seg.name,
+                    "acl_id": acl.uuid,
+                    "protocol": acl.protocol,
+                    "dst_address": acl.dst_address,
+                    "dst_mask": acl.dst_mask,
+                    "status": status,
+                    "vm_name": vm_name,
+                })
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return
+
+    console.print(f"\n[bold]ACL チェック（{_INTERNAL_IP_PREFIX}* 宛）:[/bold]")
+    total_holes = 0
+    for seg, classified in seg_results:
+        console.print(f"\n[bold]セグメント: {seg.name}[/bold] [dim]({seg.uuid})[/dim]")
+        for acl, status, vm_name in classified:
+            line = (
+                f"{acl.protocol}  "
+                f"{acl.src_address}/{acl.src_mask} :{acl.src_port}  →  "
+                f"{acl.dst_address}/{acl.dst_mask} :{acl.dst_port}"
+            )
+            if status == "hole":
+                console.print(f"  [red]⚠ 穴 [/red] {line}  [red](VM不在)[/red]")
+            elif status == "alive":
+                console.print(f"    生存 {line}  [dim](VM: {vm_name})[/dim]")
+            else:
+                console.print(f"  [dim]  範囲 {line}[/dim]")
+        h = sum(1 for _, s, _ in classified if s == "hole")
+        a = sum(1 for _, s, _ in classified if s == "alive")
+        r = sum(1 for _, s, _ in classified if s == "range")
+        total_holes += h
+        console.print(f"  [dim]合計: {len(classified)}  穴: {h}  生存: {a}  範囲: {r}[/dim]")
+    console.print(f"\n  穴の総数: [bold red]{total_holes}[/bold red]\n")
+
+    if fix:
+        if vm_maps.partial_failure:
+            console.print("[yellow]⚠ VM詳細の取得に一部失敗したため --fix を無効化しました。再実行してください[/yellow]")
+            return
+        if not holes:
+            console.print("[green]穴はありません[/green]")
+            return
+        if not questionary.confirm(f"{len(holes)}件の穴ACLを削除しますか？").unsafe_ask():
+            raise typer.Abort()
+        deleted, failed = 0, 0
+        for seg, acl in holes:
+            try:
+                delete_acl(client, acl.uuid)
+                deleted += 1
+            except Exception as e:
+                console.print(f"[red]  削除失敗 {acl.uuid}: {e}[/red]")
                 failed += 1
         stop_active_spinner()
         console.print(f"\n削除: {deleted}件  失敗: {failed}件")
