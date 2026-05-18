@@ -397,6 +397,7 @@ Expected: FAIL（`--fix` オプションが無く `No such option: --fix`）
 
 ```python
 import json
+from typing import NamedTuple
 
 import questionary
 import typer

@@ -97,3 +97,52 @@ def test_check_ip_table_output():
     assert "203.0.113.10" in result.output  # DNAT IP
     assert "203.0.113.22" in result.output  # 未使用IP
     assert "web-1" in result.output
+
+
+def test_check_ip_fix_deletes_orphan_dnat():
+    """--fix で死んだVM宛DNATを削除する"""
+    dnats = [
+        DNAT(uuid="d-alive", pool_address="203.0.113.10", segment="s", dst_address="10.15.0.5"),
+        DNAT(uuid="d-hole", pool_address="203.0.113.20", segment="s", dst_address="10.15.0.99"),
+    ]
+    with patch("mdx_cli.commands.network.list_assignable_ips", return_value=[]), \
+         patch("mdx_cli.commands.network.list_dnats", return_value=dnats), \
+         patch("mdx_cli.commands.network.list_vms", return_value=[
+             VM(uuid="vm-1", name="web-1", status="PowerON")
+         ]), \
+         patch("mdx_cli.commands.network.parallel_get", return_value=[
+             {"service_networks": [{"global_ip": "", "ipv4_address": ["10.15.0.5"]}]}
+         ]), \
+         patch("mdx_cli.commands.network.delete_dnat") as mock_delete, \
+         patch("mdx_cli.commands.network.get_client"), \
+         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
+         patch("mdx_cli.commands.network.questionary") as mock_q:
+        mock_q.confirm.return_value.unsafe_ask.return_value = True
+        result = runner.invoke(app, ["check-ip", "--project-id", "proj-1", "--fix"])
+    assert result.exit_code == 0, result.output
+    mock_delete.assert_called_once()
+    assert mock_delete.call_args[0][1] == "d-hole"
+
+
+def test_check_ip_fix_suppressed_on_partial_failure():
+    """VM詳細取得が一部失敗したら --fix を抑止する"""
+    dnats = [
+        DNAT(uuid="d-hole", pool_address="203.0.113.20", segment="s", dst_address="10.15.0.99"),
+    ]
+    with patch("mdx_cli.commands.network.list_assignable_ips", return_value=[]), \
+         patch("mdx_cli.commands.network.list_dnats", return_value=dnats), \
+         patch("mdx_cli.commands.network.list_vms", return_value=[
+             VM(uuid="vm-1", name="web-1", status="PowerON")
+         ]), \
+         patch("mdx_cli.commands.network.parallel_get", return_value=[RuntimeError("boom")]), \
+         patch("mdx_cli.commands.network.delete_dnat") as mock_delete, \
+         patch("mdx_cli.commands.network.get_client"), \
+         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
+         patch("mdx_cli.commands.network.questionary") as mock_q:
+        mock_q.confirm.return_value.unsafe_ask.return_value = True
+        result = runner.invoke(app, ["check-ip", "--project-id", "proj-1", "--fix"])
+    assert result.exit_code == 0, result.output
+    mock_delete.assert_not_called()
+    assert "無効化" in result.output
