@@ -71,7 +71,8 @@ def _collect_vm_ip_maps(client, pid: str, json_mode: bool) -> VmIpMaps:
     paths = [f"/api/vm/{v.uuid}/" for v in active_vms]
     results = parallel_get(
         settings.base_url, token, paths,
-        max_concurrent=50, on_progress=on_progress,
+        # VM詳細APIは応答が遅く、高並列だと過負荷でタイムアウトが多発するため低めに抑える
+        max_concurrent=8, on_progress=on_progress,
         return_exceptions=True,
     )
     if status_display:

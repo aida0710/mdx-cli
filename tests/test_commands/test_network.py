@@ -76,6 +76,17 @@ def test_collect_vm_ip_maps_detects_partial_failure():
     assert maps.private_ip_to_vm == {}
 
 
+def test_collect_vm_ip_maps_uses_conservative_concurrency():
+    """VM詳細取得は過負荷でタイムアウトしないよう低い並列数で行う。"""
+    vms = [VM(uuid="vm-1", name="web-1", status="PowerON")]
+    with patch("mdx_cli.commands.network.list_vms", return_value=vms), \
+         patch("mdx_cli.commands.network.parallel_get", return_value=[{}]) as mock_pg, \
+         patch("mdx_cli.commands.network.CredentialStore"):
+        _collect_vm_ip_maps(None, "proj-1", json_mode=True)
+    mc = mock_pg.call_args.kwargs.get("max_concurrent")
+    assert mc is not None and mc <= 10, f"max_concurrent={mc} は過大（VM詳細APIが詰まる）"
+
+
 def test_check_ip_table_output():
     """check-ip 表示の特性化テスト（リファクタ前の挙動を固定）"""
     with patch("mdx_cli.commands.network.list_assignable_ips", return_value=["203.0.113.22"]), \
