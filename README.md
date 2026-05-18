@@ -54,6 +54,7 @@ mdx network       ネットワーク管理
   mdx network dnat     DNAT管理
   mdx network ips      割当可能グローバルIP一覧
   mdx network check-ip グローバルIP使用状況チェック
+  mdx network check-acl ACL穴チェック
 mdx template      テンプレート管理
 mdx task          タスク・操作履歴管理
   mdx task list    操作履歴一覧
@@ -275,6 +276,9 @@ mdx network segment list         # セグメント一覧
 mdx network segment show         # セグメント詳細（一覧から選択可能）
 mdx network ips                  # 割当可能グローバルIP一覧
 mdx network check-ip             # グローバルIPv4 使用状況チェック
+mdx network check-ip --fix       # 死んだVM宛のDNATを削除
+mdx network check-acl            # 死んだVM宛のACL（穴）を検出
+mdx network check-acl --fix      # 死んだVM宛のACLを削除
 ```
 
 `check-ip` の表示例:
@@ -292,6 +296,10 @@ mdx network check-ip             # グローバルIPv4 使用状況チェック
 ```
 
 VM直接割当・DNAT経由・未使用を一覧表示。DNATの宛先からVM名も逆引き表示。並列取得で高速。
+
+`check-acl` はプロジェクト全体のACLを走査し、宛先（`10.15.*`）が現存しないVMを指すルールを「穴」として検出する。VMを削除してもACL/DNATは残るため、IPが再割当されると意図しない通信を許可してしまう。`check-ip --fix` / `check-acl --fix` で死んだVM宛のDNAT/ACLを一括削除できる。
+
+VM詳細の取得に一部失敗した場合、穴判定が不正確になるため `--fix` は自動的に無効化される（誤削除防止）。
 
 ### DNAT（全て対話式）
 
