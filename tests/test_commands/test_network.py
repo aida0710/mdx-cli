@@ -145,7 +145,45 @@ def test_check_ip_fix_suppressed_on_partial_failure():
         result = runner.invoke(app, ["check-ip", "--project-id", "proj-1", "--fix"])
     assert result.exit_code == 0, result.output
     mock_delete.assert_not_called()
-    assert "無効化" in result.output
+    assert "スキップ" in result.output
+
+
+def test_check_ip_deletes_dnat_on_confirm():
+    """--fix なし、確認に yes で穴DNATを削除する"""
+    dnats = [DNAT(uuid="d-hole", pool_address="203.0.113.20", segment="s", dst_address="10.15.0.99")]
+    with patch("mdx_cli.commands.network.list_assignable_ips", return_value=[]), \
+         patch("mdx_cli.commands.network.list_dnats", return_value=dnats), \
+         patch("mdx_cli.commands.network.list_vms", return_value=[]), \
+         patch("mdx_cli.commands.network.parallel_get", return_value=[]), \
+         patch("mdx_cli.commands.network.delete_dnat") as mock_delete, \
+         patch("mdx_cli.commands.network.get_client"), \
+         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
+         patch("mdx_cli.commands.network.questionary") as mock_q:
+        mock_q.confirm.return_value.unsafe_ask.return_value = True
+        result = runner.invoke(app, ["check-ip", "--project-id", "proj-1"])
+    assert result.exit_code == 0, result.output
+    mock_delete.assert_called_once()
+    assert mock_delete.call_args[0][1] == "d-hole"
+
+
+def test_check_ip_keeps_dnat_on_decline():
+    """--fix なし、確認に no で削除しない"""
+    dnats = [DNAT(uuid="d-hole", pool_address="203.0.113.20", segment="s", dst_address="10.15.0.99")]
+    with patch("mdx_cli.commands.network.list_assignable_ips", return_value=[]), \
+         patch("mdx_cli.commands.network.list_dnats", return_value=dnats), \
+         patch("mdx_cli.commands.network.list_vms", return_value=[]), \
+         patch("mdx_cli.commands.network.parallel_get", return_value=[]), \
+         patch("mdx_cli.commands.network.delete_dnat") as mock_delete, \
+         patch("mdx_cli.commands.network.get_client"), \
+         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
+         patch("mdx_cli.commands.network.questionary") as mock_q:
+        mock_q.confirm.return_value.unsafe_ask.return_value = False
+        result = runner.invoke(app, ["check-ip", "--project-id", "proj-1"])
+    assert result.exit_code == 0, result.output
+    mock_delete.assert_not_called()
+    mock_q.confirm.assert_called_once()
 
 
 _ACL_BASE = {
