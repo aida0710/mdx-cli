@@ -3,8 +3,9 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from mdx_cli.commands.network import app
-from mdx_cli.models.network import Segment, SegmentSummary
+from mdx_cli.commands.network import app, _collect_vm_ip_maps
+from mdx_cli.models.network import DNAT, Segment, SegmentSummary
+from mdx_cli.models.vm import VM
 
 runner = CliRunner()
 
@@ -47,3 +48,29 @@ def test_segment_show():
                 result = runner.invoke(app, ["segment", "show", "seg-1", "--project-id", "proj-1"])
                 assert result.exit_code == 0
                 assert "192.168.1.0/24" in result.output
+
+
+def test_collect_vm_ip_maps_builds_maps():
+    vms = [VM(uuid="vm-1", name="web-1", status="PowerON")]
+    detail = {
+        "service_networks": [
+            {"global_ip": "203.0.113.10", "ipv4_address": ["10.15.0.5"]}
+        ]
+    }
+    with patch("mdx_cli.commands.network.list_vms", return_value=vms), \
+         patch("mdx_cli.commands.network.parallel_get", return_value=[detail]), \
+         patch("mdx_cli.commands.network.CredentialStore"):
+        maps = _collect_vm_ip_maps(None, "proj-1", json_mode=True)
+    assert maps.private_ip_to_vm == {"10.15.0.5": "web-1"}
+    assert maps.global_ip_to_vm == {"203.0.113.10": "VM: web-1"}
+    assert maps.partial_failure is False
+
+
+def test_collect_vm_ip_maps_detects_partial_failure():
+    vms = [VM(uuid="vm-1", name="web-1", status="PowerON")]
+    with patch("mdx_cli.commands.network.list_vms", return_value=vms), \
+         patch("mdx_cli.commands.network.parallel_get", return_value=[RuntimeError("boom")]), \
+         patch("mdx_cli.commands.network.CredentialStore"):
+        maps = _collect_vm_ip_maps(None, "proj-1", json_mode=True)
+    assert maps.partial_failure is True
+    assert maps.private_ip_to_vm == {}
