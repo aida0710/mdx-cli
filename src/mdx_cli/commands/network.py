@@ -1,4 +1,8 @@
+import json
+from typing import NamedTuple
+
 import typer
+from rich.status import Status
 
 from mdx_cli.api.endpoints.networks import (
     get_segment_summary,
@@ -7,8 +11,10 @@ from mdx_cli.api.endpoints.networks import (
     list_segments,
 )
 from mdx_cli.api.endpoints.vms import get_vm, list_vms
-from mdx_cli.api.spinner import stop_active_spinner
+from mdx_cli.api.parallel import parallel_get
+from mdx_cli.api.spinner import _console as spin_console, stop_active_spinner
 from mdx_cli.commands._common import get_client, resolve_project_id, resolve_segment_id
+from mdx_cli.credentials.store import CredentialStore
 from mdx_cli.output.formatting import console, render
 from mdx_cli.output.tables import SEGMENT_COLUMNS, SEGMENT_SUMMARY_COLUMNS
 from mdx_cli.settings import Settings
@@ -22,6 +28,64 @@ app.add_typer(segment_app, name="segment")
 app.add_typer(acl_app, name="acl")
 app.add_typer(dnat_app, name="dnat")
 
+
+_INTERNAL_IP_PREFIX = "10.15."  # MDX内部ネットワーク。変更時はここだけ
+
+
+class VmIpMaps(NamedTuple):
+    global_ip_to_vm: dict[str, str]
+    private_ip_to_vm: dict[str, str]
+    partial_failure: bool
+
+
+def _collect_vm_ip_maps(client, pid: str, json_mode: bool) -> VmIpMaps:
+    """アクティブVMを並列取得し、IPマップを構築する。
+
+    global_ip_to_vm: グローバルIP → "VM: <name>"
+    private_ip_to_vm: プライベートIP → VM名
+    partial_failure: VM詳細の並列取得で1台以上失敗したか
+    """
+    vms = list_vms(client, pid)
+    stop_active_spinner()
+    active_vms = [v for v in vms if v.status != "Deallocated"]
+
+    status_display = Status("", console=spin_console, spinner="dots") if not json_mode else None
+    if status_display:
+        status_display.start()
+    done_count = 0
+
+    def on_progress(idx: int) -> None:
+        nonlocal done_count
+        done_count += 1
+        if status_display:
+            status_display.update(f"VM詳細を取得中... ({done_count}/{len(active_vms)})")
+
+    settings = Settings()
+    store = CredentialStore(config_dir=settings.config_dir)
+    token = store.load_token() or ""
+    paths = [f"/api/vm/{v.uuid}/" for v in active_vms]
+    results = parallel_get(
+        settings.base_url, token, paths,
+        max_concurrent=50, on_progress=on_progress,
+        return_exceptions=True,
+    )
+    if status_display:
+        status_display.stop()
+
+    global_ip_to_vm: dict[str, str] = {}
+    private_ip_to_vm: dict[str, str] = {}
+    partial_failure = False
+    for v, data in zip(active_vms, results):
+        if isinstance(data, Exception):
+            partial_failure = True
+            continue
+        for net in data.get("service_networks", []):
+            gip = net.get("global_ip", "")
+            if gip:
+                global_ip_to_vm[gip] = f"VM: {v.name}"
+            for pip in net.get("ipv4_address", []):
+                private_ip_to_vm[pip] = v.name
+    return VmIpMaps(global_ip_to_vm, private_ip_to_vm, partial_failure)
 
 
 @segment_app.command("list")
