@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from mdx_cli.commands.network import app, _collect_vm_ip_maps
+from mdx_cli.commands.network import app, _collect_segment_acls, _collect_vm_ip_maps
 from mdx_cli.models.network import ACL, DNAT, Segment, SegmentSummary
 from mdx_cli.models.vm import VM
 
@@ -164,6 +164,21 @@ def _make_acl(**overrides):
     return ACL(**{**_ACL_BASE, **overrides})
 
 
+def test_collect_segment_acls_parallel():
+    segments = [Segment(uuid="seg-1", name="A"), Segment(uuid="seg-2", name="B")]
+    raw = [
+        {"results": [_ACL_BASE]},
+        {"results": []},
+    ]
+    with patch("mdx_cli.commands.network.parallel_get", return_value=raw), \
+         patch("mdx_cli.commands.network.CredentialStore"):
+        acl_lists = _collect_segment_acls(None, segments, json_mode=True)
+    assert len(acl_lists) == 2
+    assert len(acl_lists[0]) == 1
+    assert acl_lists[0][0].uuid == "acl-x"
+    assert acl_lists[1] == []
+
+
 def test_check_acl_classifies_holes_alive_range():
     """穴・生存・範囲指定を分類して表示する"""
     acls = [
@@ -174,7 +189,7 @@ def test_check_acl_classifies_holes_alive_range():
     with patch("mdx_cli.commands.network.list_segments", return_value=[
              Segment(uuid="seg-1", name="seg-A")
          ]), \
-         patch("mdx_cli.commands.network.list_acls", return_value=acls), \
+         patch("mdx_cli.commands.network._collect_segment_acls", return_value=[acls]), \
          patch("mdx_cli.commands.network.list_vms", return_value=[
              VM(uuid="vm-1", name="web-1", status="PowerON")
          ]), \
@@ -202,7 +217,7 @@ def test_check_acl_excludes_non_internal_dst():
     with patch("mdx_cli.commands.network.list_segments", return_value=[
              Segment(uuid="seg-1", name="seg-A")
          ]), \
-         patch("mdx_cli.commands.network.list_acls", return_value=acls), \
+         patch("mdx_cli.commands.network._collect_segment_acls", return_value=[acls]), \
          patch("mdx_cli.commands.network.list_vms", return_value=[]), \
          patch("mdx_cli.commands.network.parallel_get", return_value=[]), \
          patch("mdx_cli.commands.network.get_client"), \
@@ -219,7 +234,7 @@ def test_check_acl_json():
     with patch("mdx_cli.commands.network.list_segments", return_value=[
              Segment(uuid="seg-1", name="seg-A")
          ]), \
-         patch("mdx_cli.commands.network.list_acls", return_value=acls), \
+         patch("mdx_cli.commands.network._collect_segment_acls", return_value=[acls]), \
          patch("mdx_cli.commands.network.list_vms", return_value=[]), \
          patch("mdx_cli.commands.network.parallel_get", return_value=[]), \
          patch("mdx_cli.commands.network.get_client"), \
@@ -242,7 +257,7 @@ def test_check_acl_fix_deletes_holes():
     with patch("mdx_cli.commands.network.list_segments", return_value=[
              Segment(uuid="seg-1", name="seg-A")
          ]), \
-         patch("mdx_cli.commands.network.list_acls", return_value=acls), \
+         patch("mdx_cli.commands.network._collect_segment_acls", return_value=[acls]), \
          patch("mdx_cli.commands.network.list_vms", return_value=[
              VM(uuid="vm-1", name="web-1", status="PowerON")
          ]), \
@@ -267,7 +282,7 @@ def test_check_acl_fix_suppressed_on_partial_failure():
     with patch("mdx_cli.commands.network.list_segments", return_value=[
              Segment(uuid="seg-1", name="seg-A")
          ]), \
-         patch("mdx_cli.commands.network.list_acls", return_value=acls), \
+         patch("mdx_cli.commands.network._collect_segment_acls", return_value=[acls]), \
          patch("mdx_cli.commands.network.list_vms", return_value=[
              VM(uuid="vm-1", name="web-1", status="PowerON")
          ]), \
