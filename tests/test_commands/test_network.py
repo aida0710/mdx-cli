@@ -231,3 +231,54 @@ def test_check_acl_json():
     assert len(data) == 1
     assert data[0]["status"] == "hole"
     assert data[0]["acl_id"] == "acl-hole"
+
+
+def test_check_acl_fix_deletes_holes():
+    """--fix で穴ACLを削除する"""
+    acls = [
+        _make_acl(uuid="acl-hole", dst_address="10.15.0.99"),
+        _make_acl(uuid="acl-alive", dst_address="10.15.0.5"),
+    ]
+    with patch("mdx_cli.commands.network.list_segments", return_value=[
+             Segment(uuid="seg-1", name="seg-A")
+         ]), \
+         patch("mdx_cli.commands.network.list_acls", return_value=acls), \
+         patch("mdx_cli.commands.network.list_vms", return_value=[
+             VM(uuid="vm-1", name="web-1", status="PowerON")
+         ]), \
+         patch("mdx_cli.commands.network.parallel_get", return_value=[
+             {"service_networks": [{"global_ip": "", "ipv4_address": ["10.15.0.5"]}]}
+         ]), \
+         patch("mdx_cli.commands.network.delete_acl") as mock_delete, \
+         patch("mdx_cli.commands.network.get_client"), \
+         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
+         patch("mdx_cli.commands.network.questionary") as mock_q:
+        mock_q.confirm.return_value.unsafe_ask.return_value = True
+        result = runner.invoke(app, ["check-acl", "--project-id", "proj-1", "--fix"])
+    assert result.exit_code == 0, result.output
+    mock_delete.assert_called_once()
+    assert mock_delete.call_args[0][1] == "acl-hole"
+
+
+def test_check_acl_fix_suppressed_on_partial_failure():
+    """VM詳細取得が一部失敗したら --fix を抑止する"""
+    acls = [_make_acl(uuid="acl-hole", dst_address="10.15.0.99")]
+    with patch("mdx_cli.commands.network.list_segments", return_value=[
+             Segment(uuid="seg-1", name="seg-A")
+         ]), \
+         patch("mdx_cli.commands.network.list_acls", return_value=acls), \
+         patch("mdx_cli.commands.network.list_vms", return_value=[
+             VM(uuid="vm-1", name="web-1", status="PowerON")
+         ]), \
+         patch("mdx_cli.commands.network.parallel_get", return_value=[RuntimeError("boom")]), \
+         patch("mdx_cli.commands.network.delete_acl") as mock_delete, \
+         patch("mdx_cli.commands.network.get_client"), \
+         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
+         patch("mdx_cli.commands.network.questionary") as mock_q:
+        mock_q.confirm.return_value.unsafe_ask.return_value = True
+        result = runner.invoke(app, ["check-acl", "--project-id", "proj-1", "--fix"])
+    assert result.exit_code == 0, result.output
+    mock_delete.assert_not_called()
+    assert "無効化" in result.output
