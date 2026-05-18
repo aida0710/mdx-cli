@@ -1,10 +1,12 @@
 import json
 from typing import NamedTuple
 
+import questionary
 import typer
 from rich.status import Status
 
 from mdx_cli.api.endpoints.networks import (
+    delete_dnat,
     get_segment_summary,
     list_assignable_ips,
     list_dnats,
@@ -136,6 +138,7 @@ def ips_list(
 def check_ip(
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID（省略時は選択済みを使用）", envvar="MDX_PROJECT_ID"),
     json_mode: bool = typer.Option(False, "--json", help="JSON出力"),
+    fix: bool = typer.Option(False, "--fix", help="死んだVM宛のDNATを削除"),
 ) -> None:
     """グローバルIPv4の使用状況を確認"""
     pid = resolve_project_id(project_id)
@@ -154,14 +157,17 @@ def check_ip(
     vm_map = vm_maps.global_ip_to_vm
     private_ip_to_vm = vm_maps.private_ip_to_vm
 
-    # DNATの宛先IPからVM名を逆引き
+    # DNATの宛先IPからVM名を逆引き。死んだVM宛は穴として収集
     dnat_map: dict[str, str] = {}
+    hole_dnats = []
     for d in dnats:
         vm_name = private_ip_to_vm.get(d.dst_address, "")
         if vm_name:
             dnat_map[d.pool_address] = f"DNAT → {d.dst_address} ({vm_name})"
         else:
             dnat_map[d.pool_address] = f"DNAT → {d.dst_address}"
+            if d.dst_address.startswith(_INTERNAL_IP_PREFIX):
+                hole_dnats.append(d)
 
     # 全IP を集約
     all_ips = sorted(assignable | set(dnat_map.keys()) | set(vm_map.keys()))
@@ -194,3 +200,26 @@ def check_ip(
     free_count = sum(1 for ip in all_ips if ip not in vm_map and ip not in dnat_map)
     console.print(f"\n  合計: {len(all_ips)}  使用中: {used_count}  未使用: {free_count}")
     console.print()
+
+    if fix and not json_mode:
+        if vm_maps.partial_failure:
+            console.print("[yellow]⚠ VM詳細の取得に一部失敗したため --fix を無効化しました。再実行してください[/yellow]")
+            return
+        if not hole_dnats:
+            console.print("[green]穴（死んだVM宛のDNAT）はありません[/green]")
+            return
+        console.print(f"[bold red]{len(hole_dnats)}件の穴DNATを削除します:[/bold red]")
+        for d in hole_dnats:
+            console.print(f"  {d.pool_address} → {d.dst_address} [dim]({d.uuid})[/dim]")
+        if not questionary.confirm(f"{len(hole_dnats)}件を削除しますか？").unsafe_ask():
+            raise typer.Abort()
+        deleted, failed = 0, 0
+        for d in hole_dnats:
+            try:
+                delete_dnat(client, d.uuid)
+                deleted += 1
+            except Exception as e:
+                console.print(f"[red]  削除失敗 {d.uuid}: {e}[/red]")
+                failed += 1
+        stop_active_spinner()
+        console.print(f"\n削除: {deleted}件  失敗: {failed}件")
