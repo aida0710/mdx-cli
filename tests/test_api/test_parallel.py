@@ -105,6 +105,24 @@ def test_parallel_get_404_is_retried():
 
 
 @respx.mock
+def test_parallel_get_timeout_is_retried():
+    """ReadTimeout もリトライ対象（並列負荷時のタイムアウトを一時エラーとして扱う）。"""
+    respx.get("https://oprpl.mdx.jp/api/vm/vm-slow/").mock(
+        side_effect=[
+            httpx.ReadTimeout("timeout"),
+            httpx.Response(200, json={"uuid": "vm-slow"}),
+        ]
+    )
+    with patch("mdx_cli.api.parallel.RETRY_BACKOFF", [0, 0, 0]):
+        results = parallel_get(
+            base_url="https://oprpl.mdx.jp",
+            token="test-token",
+            paths=["/api/vm/vm-slow/"],
+        )
+    assert results[0]["uuid"] == "vm-slow"
+
+
+@respx.mock
 def test_parallel_get_return_exceptions_partial_failure():
     """return_exceptions=True で部分失敗があっても全体は止まらない。"""
     respx.get("https://oprpl.mdx.jp/api/vm/vm-1/").mock(

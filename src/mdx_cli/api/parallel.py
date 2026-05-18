@@ -50,7 +50,7 @@ async def _fetch_one(
                 if on_progress:
                     on_progress(index)
                 return resp.json()
-            except (httpx.HTTPStatusError, httpx.ConnectError) as e:
+            except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException) as e:
                 if attempt < MAX_RETRIES - 1:
                     wait = RETRY_BACKOFF[attempt]
                     logger.debug("GET %s failed (%s), retry in %ds", url, e, wait)
