@@ -189,6 +189,26 @@ def test_parallel_wait_retries_on_404():
 
 
 @respx.mock
+def test_parallel_wait_retries_on_timeout():
+    """タスク待機中の ReadTimeout もリトライして継続する。"""
+    respx.get("https://oprpl.mdx.jp/api/task/task-slow/").mock(
+        side_effect=[
+            httpx.ReadTimeout("timeout"),
+            httpx.Response(200, json={"status": "Completed"}),
+        ]
+    )
+    results = parallel_wait(
+        base_url="https://oprpl.mdx.jp",
+        token="test-token",
+        task_ids=["task-slow"],
+        poll_interval=0,
+        timeout=10,
+    )
+    assert len(results) == 1
+    assert results[0]["status"] == "Completed"
+
+
+@respx.mock
 def test_parallel_wait_404_eventually_returns_unknown():
     """404 が一定回数続いたら諦めてエラーなく抜ける（無限ループ防止）。"""
     respx.get("https://oprpl.mdx.jp/api/task/task-bad/").mock(

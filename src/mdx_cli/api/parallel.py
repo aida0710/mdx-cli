@@ -162,7 +162,17 @@ async def _wait_one(
         start = time.monotonic()
         last_data: dict = {}
         while True:
-            resp = await client.get(f"/api/task/{task_id}/")
+            try:
+                resp = await client.get(f"/api/task/{task_id}/")
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                # ネットワーク一時エラー → タイムアウトまでポーリングを継続
+                if time.monotonic() - start >= timeout:
+                    if on_done:
+                        on_done(task_id, last_data)
+                    return last_data
+                logger.debug("task %s poll failed (%s), retry", task_id, e)
+                await asyncio.sleep(poll_interval)
+                continue
             if resp.status_code == 404:
                 # タスクがまだ登録されてない or トークン競合 → リトライ
                 if time.monotonic() - start >= timeout:
