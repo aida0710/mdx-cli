@@ -357,22 +357,17 @@ def check_acl(
         console.print(f"  [dim]合計: {len(classified)}  穴: {h}  生存: {a}  範囲: {r}[/dim]")
     console.print(f"\n  穴の総数: [bold red]{total_holes}[/bold red]\n")
 
-    if fix:
+    if not json_mode and holes:
         if vm_maps.partial_failure:
-            console.print("[yellow]⚠ VM詳細の取得に一部失敗したため --fix を無効化しました。再実行してください[/yellow]")
-            return
-        if not holes:
-            console.print("[green]穴はありません[/green]")
-            return
-        if not questionary.confirm(f"{len(holes)}件の穴ACLを削除しますか？").unsafe_ask():
-            raise typer.Abort()
-        deleted, failed = 0, 0
-        for seg, acl in holes:
-            try:
-                delete_acl(client, acl.uuid)
-                deleted += 1
-            except Exception as e:
-                console.print(f"[red]  削除失敗 {acl.uuid}: {e}[/red]")
-                failed += 1
-        stop_active_spinner()
-        console.print(f"\n削除: {deleted}件  失敗: {failed}件")
+            console.print("[yellow]⚠ VM詳細の取得に一部失敗しています。誤削除防止のため削除をスキップしました。再実行してください[/yellow]")
+        elif fix or questionary.confirm(f"{len(holes)}件の穴ACLを削除しますか？").unsafe_ask():
+            deleted, failed = 0, 0
+            for seg, acl in holes:
+                try:
+                    delete_acl(client, acl.uuid)
+                    deleted += 1
+                except Exception as e:
+                    console.print(f"[red]  削除失敗 {acl.uuid}: {e}[/red]")
+                    failed += 1
+            stop_active_spinner()
+            console.print(f"\n削除: {deleted}件  失敗: {failed}件")
