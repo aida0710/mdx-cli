@@ -158,6 +158,17 @@ def _list_pubkeys() -> list[Path]:
     )
 
 
+def _pubkey_preview(path: Path) -> str:
+    """公開鍵ファイル内容のプレビュー（先頭30文字...末尾30文字）。"""
+    try:
+        content = path.read_text().strip()
+    except OSError:
+        return "(読み取り不可)"
+    if len(content) <= 63:
+        return content
+    return f"{content[:30]}...{content[-30:]}"
+
+
 @app.command()
 def deploy(
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID（省略時は選択済みを使用）", envvar="MDX_PROJECT_ID"),
@@ -223,6 +234,7 @@ def deploy(
             console.print("[dim]  ~/.ssh/ にある公開鍵:[/dim]")
             for i, p in enumerate(pubkeys, 1):
                 console.print(f"  {i}) {p.name}")
+                console.print(f"     [grey50]{_pubkey_preview(p)}[/grey50]")
             console.print("[dim]  番号で選択、または絶対パス/~/... を直接入力[/dim]")
             answer = questionary.text("番号またはパス:", default="1").unsafe_ask()
             if answer.strip().isdigit() and 1 <= int(answer) <= len(pubkeys):

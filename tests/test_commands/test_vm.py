@@ -464,6 +464,27 @@ def test_list_pubkeys_returns_empty_when_no_ssh_dir(tmp_path):
         assert _list_pubkeys() == []
 
 
+from mdx_cli.commands.vm import _pubkey_preview
+
+
+def test_pubkey_preview_abbreviates_long_content(tmp_path):
+    """長い公開鍵は 先頭30文字...末尾30文字 に省略する。"""
+    f = tmp_path / "k.pub"
+    content = (
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEYDATA0123456789ABCDEF "
+        "user@example.com"
+    )
+    f.write_text(content + "\n")
+    assert _pubkey_preview(f) == f"{content[:30]}...{content[-30:]}"
+
+
+def test_pubkey_preview_short_content_shown_as_is(tmp_path):
+    """短い内容（63文字以下）はそのまま返す。"""
+    f = tmp_path / "k.pub"
+    f.write_text("ssh-rsa SHORT")
+    assert _pubkey_preview(f) == "ssh-rsa SHORT"
+
+
 def _deploy_common_args(key_omitted=True):
     args = [
         "deploy",
@@ -481,11 +502,15 @@ def _deploy_common_args(key_omitted=True):
 
 def test_vm_deploy_interactive_lists_pubkeys_and_selects_by_number(tmp_path):
     """対話時、~/.ssh の .pub 一覧を表示し、番号入力で選択＋確認メッセージを出す。"""
+    body3 = (
+        "ssh-ed25519 AAAADATASETKEY3DATA0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ "
+        "c@example.com"
+    )
     keys = []
     for name, body in [
-        ("id_ed25519.pub", "ssh-ed25519 KEY1"),
-        ("mdx-aida-master.pub", "ssh-ed25519 KEY2"),
-        ("mdx-dataset-acc.pub", "ssh-ed25519 KEY3"),
+        ("id_ed25519.pub", "ssh-ed25519 AAAAEDKEY1DATA0000000000000000000 a@example.com"),
+        ("mdx-aida-master.pub", "ssh-ed25519 AAAAMASTERKEY2DATA000000000000 b@example.com"),
+        ("mdx-dataset-acc.pub", body3),
     ]:
         f = tmp_path / name
         f.write_text(body)
@@ -509,11 +534,11 @@ def test_vm_deploy_interactive_lists_pubkeys_and_selects_by_number(tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "mdx-dataset-acc.pub" in result.output
+    # 一覧に内容プレビュー（先頭30...末尾30）が出る
+    assert f"{body3[:30]}...{body3[-30:]}" in result.output
     # 番号選択後の確認メッセージ
-    assert "3番" in result.output
-    assert "mdx-dataset-acc.pub" in result.output
     assert "選択" in result.output
-    assert captured_requests[0].shared_key == "ssh-ed25519 KEY3"
+    assert captured_requests[0].shared_key == body3
 
 
 def test_vm_deploy_interactive_warns_when_no_pubkey(tmp_path):
