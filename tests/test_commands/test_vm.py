@@ -430,3 +430,114 @@ def test_vm_deploy_zero_padded_does_not_aggregate(tmp_path):
                         vm_names = [r.vm_name for r in captured_requests]
                         assert vm_names[0] == "node-00"
                         assert vm_names[-1] == "node-09"
+
+
+# --- SSH公開鍵 一覧/警告 ---
+
+from mdx_cli.commands.vm import _list_pubkeys
+
+
+def test_list_pubkeys_orders_standard_keys_first(tmp_path):
+    """~/.ssh の *.pub を、標準鍵名を優先しつつ列挙する。"""
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir()
+    for name in ["zzz.pub", "aaa.pub", "id_rsa.pub", "id_ed25519.pub"]:
+        (ssh_dir / name).write_text("ssh-key")
+    # .pub でないものは除外される
+    (ssh_dir / "id_rsa").write_text("private")
+    (ssh_dir / "config").write_text("config")
+
+    with patch.object(Path, "home", return_value=tmp_path):
+        result = _list_pubkeys()
+
+    assert [p.name for p in result] == [
+        "id_ed25519.pub",
+        "id_rsa.pub",
+        "aaa.pub",
+        "zzz.pub",
+    ]
+
+
+def test_list_pubkeys_returns_empty_when_no_ssh_dir(tmp_path):
+    """~/.ssh が無ければ空リストを返す。"""
+    with patch.object(Path, "home", return_value=tmp_path):
+        assert _list_pubkeys() == []
+
+
+def _deploy_common_args(key_omitted=True):
+    args = [
+        "deploy",
+        "-t", "Ubuntu",
+        "-n", "test-{0-9}",
+        "--pack-type", "cpu",
+        "--pack-num", "4",
+        "--disk", "40",
+        "--service-level", "spot",
+        "-y",
+        "--no-wait",
+    ]
+    return args
+
+
+def test_vm_deploy_interactive_lists_pubkeys_and_selects_by_number(tmp_path):
+    """対話時、~/.ssh の .pub 一覧を表示し、番号入力で選択＋確認メッセージを出す。"""
+    keys = []
+    for name, body in [
+        ("id_ed25519.pub", "ssh-ed25519 KEY1"),
+        ("mdx-aida-master.pub", "ssh-ed25519 KEY2"),
+        ("mdx-dataset-acc.pub", "ssh-ed25519 KEY3"),
+    ]:
+        f = tmp_path / name
+        f.write_text(body)
+        keys.append(f)
+
+    captured_requests: list = []
+
+    def mock_deploy(client, req):
+        captured_requests.append(req)
+        return VMDeployResponse(task_id=[f"task-{i}" for i in range(10)])
+
+    with patch("mdx_cli.commands.vm.list_templates", return_value=[_make_template()]):
+        with patch("mdx_cli.commands.vm.list_segments", return_value=[_make_segment()]):
+            with patch("mdx_cli.commands.vm.deploy_vm", side_effect=mock_deploy):
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands.vm._list_pubkeys", return_value=keys):
+                            with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                                mock_q.text.return_value.unsafe_ask.return_value = "3"
+                                result = runner.invoke(app, _deploy_common_args())
+
+    assert result.exit_code == 0, result.output
+    assert "mdx-dataset-acc.pub" in result.output
+    # 番号選択後の確認メッセージ
+    assert "3番" in result.output
+    assert "mdx-dataset-acc.pub" in result.output
+    assert "選択" in result.output
+    assert captured_requests[0].shared_key == "ssh-ed25519 KEY3"
+
+
+def test_vm_deploy_interactive_warns_when_no_pubkey(tmp_path):
+    """対話時、~/.ssh に .pub が無ければ警告を出す。"""
+    key_file = tmp_path / "mykey.pub"
+    key_file.write_text("ssh-ed25519 AAAAKEY2")
+
+    captured_requests: list = []
+
+    def mock_deploy(client, req):
+        captured_requests.append(req)
+        return VMDeployResponse(task_id=[f"task-{i}" for i in range(10)])
+
+    with patch("mdx_cli.commands.vm.list_templates", return_value=[_make_template()]):
+        with patch("mdx_cli.commands.vm.list_segments", return_value=[_make_segment()]):
+            with patch("mdx_cli.commands.vm.deploy_vm", side_effect=mock_deploy):
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands.vm._list_pubkeys", return_value=[]):
+                            with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                                mock_q.text.return_value.unsafe_ask.return_value = str(key_file)
+                                result = runner.invoke(app, _deploy_common_args())
+
+    assert result.exit_code == 0, result.output
+    assert "警告" in result.output
+    assert ".pub" in result.output
+    assert captured_requests[0].shared_key == "ssh-ed25519 AAAAKEY2"

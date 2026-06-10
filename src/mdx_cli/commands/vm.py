@@ -146,19 +146,16 @@ def show(
     console.print()
 
 
-def _find_default_pubkey_path() -> str | None:
-    """~/.ssh から公開鍵パスを探す。"""
+def _list_pubkeys() -> list[Path]:
+    """~/.ssh にある公開鍵(.pub)の一覧を返す。標準的な鍵名を優先して並べる。"""
     ssh_dir = Path.home() / ".ssh"
-    # 標準的な鍵名を優先
-    for name in ["id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub"]:
-        path = ssh_dir / name
-        if path.exists():
-            return f"~/.ssh/{name}"
-    # なければ *.pub を探す
-    pubs = sorted(ssh_dir.glob("*.pub"))
-    if pubs:
-        return f"~/.ssh/{pubs[0].name}"
-    return None
+    if not ssh_dir.is_dir():
+        return []
+    priority = {"id_ed25519.pub": 0, "id_rsa.pub": 1, "id_ecdsa.pub": 2}
+    return sorted(
+        ssh_dir.glob("*.pub"),
+        key=lambda p: (priority.get(p.name, 99), p.name),
+    )
 
 
 @app.command()
@@ -220,11 +217,25 @@ def deploy(
     if key:
         key_path = Path(key).expanduser()
     else:
-        default_path = _find_default_pubkey_path() or ""
         console.print("\n[bold]SSH公開鍵[/bold]")
-        console.print("[dim]  絶対パスまたは ~/... で指定。デフォルトは ~/.ssh/ から自動検出[/dim]")
-        key_path_input = questionary.text("パス:", default=default_path).unsafe_ask()
-        key_path = Path(key_path_input).expanduser()
+        pubkeys = _list_pubkeys()
+        if pubkeys:
+            console.print("[dim]  ~/.ssh/ にある公開鍵:[/dim]")
+            for i, p in enumerate(pubkeys, 1):
+                console.print(f"  {i}) {p.name}")
+            console.print("[dim]  番号で選択、または絶対パス/~/... を直接入力[/dim]")
+            answer = questionary.text("番号またはパス:", default="1").unsafe_ask()
+            if answer.strip().isdigit() and 1 <= int(answer) <= len(pubkeys):
+                idx = int(answer)
+                key_path = pubkeys[idx - 1]
+                console.print(f"[green]{key_path.name} が選択されました[/green]")
+            else:
+                key_path = Path(answer).expanduser()
+        else:
+            console.print("[yellow]  警告: ~/.ssh/ に .pub ファイルが見つかりません[/yellow]")
+            console.print("[dim]  絶対パスまたは ~/... で公開鍵のパスを指定してください[/dim]")
+            answer = questionary.text("パス:").unsafe_ask()
+            key_path = Path(answer).expanduser()
     if not key_path.is_absolute():
         console.print("[red]絶対パスまたは ~/... で指定してください[/red]")
         raise typer.Exit(code=1)
