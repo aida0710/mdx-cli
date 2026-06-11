@@ -1,15 +1,14 @@
-from mdx_cli.commands._common import get_client, resolve_project_id
 import typer
-from rich.console import Console
 
 from mdx_cli.api.spinner import stop_active_spinner
 from mdx_cli.api.endpoints.tasks import get_task, list_history, wait_for_task
+from mdx_cli.commands._common import get_client, resolve_project_id
+from mdx_cli.console import console
 from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import HISTORY_COLUMNS, TASK_COLUMNS
-from mdx_cli.settings import Settings
+from mdx_cli.settings import get_settings
 
 app = typer.Typer(no_args_is_help=True, help="タスク管理")
-console = Console()
 
 
 @app.command("list")
@@ -45,7 +44,7 @@ def wait(
 ) -> None:
     """タスク完了まで待機"""
     client = get_client(silent=json)
-    settings = Settings()
+    settings = get_settings()
     stop_active_spinner()
     console.print(f"タスク {task_id} の完了を待機中...")
     task = wait_for_task(

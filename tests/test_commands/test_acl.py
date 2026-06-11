@@ -58,16 +58,18 @@ def test_acl_edit_interactive():
         with patch("mdx_cli.commands.acl.update_acl", return_value=acl_updated):
             with patch("mdx_cli.commands.acl.get_client"):
                 with patch("mdx_cli.commands.acl.resolve_segment_id", return_value="seg-1"):
-                    with patch("mdx_cli.commands.acl.questionary") as mock_q:
-                        mock_q.text.return_value.unsafe_ask.side_effect = [
-                            "1",  # 番号選択
-                            "0.0.0.0", "0.0.0.0", "Any",  # src
-                            "10.0.0.1", "32", "80",  # dst
-                        ]
-                        mock_q.select.return_value.unsafe_ask.return_value = "UDP"
-                        mock_q.confirm.return_value.unsafe_ask.return_value = True
-                        result = runner.invoke(app, ["edit", "--json"])
-                        assert result.exit_code == 0
+                    with patch("mdx_cli.commands._common.questionary") as mock_common_q:
+                        # ACL一覧からの番号選択（select_from_list 経由）
+                        mock_common_q.text.return_value.unsafe_ask.return_value = "1"
+                        with patch("mdx_cli.commands.acl.questionary") as mock_q:
+                            mock_q.text.return_value.unsafe_ask.side_effect = [
+                                "0.0.0.0", "0.0.0.0", "Any",  # src
+                                "10.0.0.1", "32", "80",  # dst
+                            ]
+                            mock_q.select.return_value.unsafe_ask.return_value = "UDP"
+                            mock_q.confirm.return_value.unsafe_ask.return_value = True
+                            result = runner.invoke(app, ["edit", "--json"])
+                            assert result.exit_code == 0
 
 
 def test_acl_delete():

@@ -36,7 +36,7 @@ from mdx_cli.console import console
 from mdx_cli.models.pack import PACK_SPECS
 from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import VM_COLUMNS
-from mdx_cli.settings import Settings
+from mdx_cli.settings import get_settings
 
 app = typer.Typer(no_args_is_help=True, help="仮想マシン管理")
 
@@ -459,7 +459,7 @@ def _wait_for_poweroff(running_vms: list, poll_interval: int = 5, max_polls: int
     import asyncio
 
     token, base_url = get_auth_context()
-    settings = Settings()
+    settings = get_settings()
     resolved = base_url if base_url.endswith("/") else base_url + "/"
 
     with progress_status("停止待機中", len(running_vms)) as progress:
@@ -535,7 +535,7 @@ def _print_task_results(task_results: list[dict]) -> None:
 def _parallel_task_wait(task_ids: list[str]) -> list[dict]:
     """複数タスクを並列ポーリングで待機する。"""
     token, base_url = get_auth_context()
-    settings = Settings()
+    settings = get_settings()
 
     def on_done(tid: str, data: dict, progress) -> None:
         name = data.get("object_name", tid[:8])

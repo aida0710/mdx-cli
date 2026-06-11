@@ -38,12 +38,15 @@ def test_dnat_add_interactive():
             with patch("mdx_cli.commands.dnat.resolve_project_id", return_value="proj-1"):
                 with patch("mdx_cli.commands.dnat.list_assignable_ips", return_value=["203.0.113.11"]):
                     with patch("mdx_cli.commands.dnat.resolve_segment_id", return_value="seg-1"):
-                        with patch("mdx_cli.commands.dnat.questionary") as mock_q:
-                            mock_q.text.return_value.unsafe_ask.side_effect = ["1", "10.0.0.1"]
-                            mock_q.confirm.return_value.unsafe_ask.return_value = True
-                            result = runner.invoke(app, ["add"])
-                            assert result.exit_code == 0
-                            mock_create.assert_called_once()
+                        with patch("mdx_cli.commands._common.questionary") as mock_common_q:
+                            # IP一覧からの番号選択（select_from_list 経由）
+                            mock_common_q.text.return_value.unsafe_ask.return_value = "1"
+                            with patch("mdx_cli.commands.dnat.questionary") as mock_q:
+                                mock_q.text.return_value.unsafe_ask.return_value = "10.0.0.1"
+                                mock_q.confirm.return_value.unsafe_ask.return_value = True
+                                result = runner.invoke(app, ["add"])
+                                assert result.exit_code == 0
+                                mock_create.assert_called_once()
 
 
 def test_dnat_delete():

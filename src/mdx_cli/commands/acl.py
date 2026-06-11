@@ -1,7 +1,5 @@
 import questionary
-from questionary import Choice
 import typer
-from rich.console import Console
 
 from mdx_cli.api.endpoints.networks import (
     create_acl,
@@ -10,13 +8,27 @@ from mdx_cli.api.endpoints.networks import (
     update_acl,
 )
 from mdx_cli.api.spinner import stop_active_spinner
-from mdx_cli.commands._common import get_client, resolve_segment_id
+from mdx_cli.commands._common import (
+    fail,
+    get_client,
+    resolve_segment_id,
+    select_from_list,
+)
+from mdx_cli.console import console
 from mdx_cli.models.network import ACLCreateRequest, ACLUpdateRequest
-from mdx_cli.output.formatting import console, render
+from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import ACL_COLUMNS
-from mdx_cli.settings import Settings
 
 app = typer.Typer(no_args_is_help=True, help="ACL管理")
+
+
+def _format_acl(a) -> str:
+    return (
+        f"[cyan]{a.protocol}[/cyan]"
+        f"  {a.src_address}/{a.src_mask} :{a.src_port}"
+        f"  →  {a.dst_address}/{a.dst_mask} :{a.dst_port}"
+        f"  [dim]({a.uuid})[/dim]"
+    )
 
 
 
@@ -88,36 +100,23 @@ def acl_edit(
     """ACLルール編集（対話式）"""
     client = get_client(silent=json)
 
-    # ACL ID が未指定なら一覧から選択
-    if not acl_id:
-        seg_id = resolve_segment_id(client, segment_id, project_id)
-        acls = list_acls(client, seg_id)
-        stop_active_spinner()
+    # IDから現在値を取得するにはlist経由で探す必要がある
+    seg_id = resolve_segment_id(client, segment_id, project_id)
+    acls = list_acls(client, seg_id)
+    stop_active_spinner()
 
+    if not acl_id:
         if not acls:
             console.print("[yellow]ACLルールがありません[/yellow]")
             raise typer.Exit()
-
-        console.print("\n[bold]ACL一覧:[/bold]")
-        for i, a in enumerate(acls, 1):
-            console.print(
-                f"  {i}) [cyan]{a.protocol}[/cyan]"
-                f"  {a.src_address}/{a.src_mask} :{a.src_port}"
-                f"  →  {a.dst_address}/{a.dst_mask} :{a.dst_port}"
-                f"  [dim]({a.uuid})[/dim]"
-            )
-        idx = int(questionary.text("\n編集する番号:").unsafe_ask()) - 1
-        selected = acls[idx]
+        selected = select_from_list(
+            acls, _format_acl, title="ACL一覧:", prompt="編集する番号:"
+        )
         acl_id = selected.uuid
     else:
-        # IDから現在値を取得するにはlist経由で探す必要がある
-        seg_id = resolve_segment_id(client, segment_id, project_id)
-        acls = list_acls(client, seg_id)
-        stop_active_spinner()
         selected = next((a for a in acls if a.uuid == acl_id), None)
         if not selected:
-            console.print(f"[red]ACL {acl_id} が見つかりません[/red]")
-            raise typer.Exit(code=1)
+            fail(f"ACL {acl_id} が見つかりません")
 
     # 現在値を表示して編集
     console.print(f"\n[bold]現在の値（Enterでそのまま）:[/bold]")
@@ -177,16 +176,10 @@ def acl_delete(
             console.print("[yellow]ACLルールがありません[/yellow]")
             raise typer.Exit()
 
-        console.print("\n[bold]ACL一覧:[/bold]")
-        for i, a in enumerate(acls, 1):
-            console.print(
-                f"  {i}) [cyan]{a.protocol}[/cyan]"
-                f"  {a.src_address}/{a.src_mask} :{a.src_port}"
-                f"  →  {a.dst_address}/{a.dst_mask} :{a.dst_port}"
-                f"  [dim]({a.uuid})[/dim]"
-            )
-        idx = int(questionary.text("\n削除する番号:").unsafe_ask()) - 1
-        acl_id = acls[idx].uuid
+        selected = select_from_list(
+            acls, _format_acl, title="ACL一覧:", prompt="削除する番号:"
+        )
+        acl_id = selected.uuid
 
     if not yes:
         if not questionary.confirm(f"ACL {acl_id} を削除しますか？").unsafe_ask():
