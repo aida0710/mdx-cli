@@ -42,8 +42,8 @@ def fetch_all(
     all_items = list(data["results"])
     total = data.get("count", len(all_items))
 
-    # スピナーの進捗を更新
-    spinner = getattr(client, "_spinner", None)
+    # スピナーの進捗を更新（MDXClient 以外の素の httpx.Client でも動くように getattr）
+    spinner = getattr(client, "spinner", None)
 
     page = 1
     while data.get("next"):
