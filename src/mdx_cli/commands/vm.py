@@ -24,9 +24,13 @@ from mdx_cli.api.endpoints.vms import (
     sync_vms,
 )
 from mdx_cli.api.parallel import parallel_post, parallel_wait
-from mdx_cli.api.spinner import stop_active_spinner
-from mdx_cli.commands._common import get_client, resolve_project_id
-from mdx_cli.credentials.store import CredentialStore
+from mdx_cli.api.spinner import progress_status, stop_active_spinner
+from mdx_cli.commands._common import (
+    get_auth_context,
+    get_client,
+    refresh_token_proactive,
+    resolve_project_id,
+)
 from mdx_cli.commands._name_pattern import (
     expand_name_pattern,
     expand_name_pattern_for_deploy,
@@ -398,32 +402,6 @@ def _resolve_vms(client, pattern: str, project_id: str | None) -> list:
     return [v for v in all_vms if v.name in set(matched_names)]
 
 
-def _get_token_and_base() -> tuple[str, str]:
-    """並列API用にトークンとベースURLを取得する。"""
-    settings = Settings()
-    store = CredentialStore(config_dir=settings.config_dir)
-    return store.load_token() or "", settings.base_url
-
-
-def _refresh_token_proactive() -> None:
-    """バルク操作前にトークンを無条件リフレッシュして保存する。
-
-    parallel_post は MDXAuth を経由しないため、チャンクごとに新鮮なトークンを
-    取得しておく。失敗時は既存トークンで続行。
-    """
-    from mdx_cli.api.auth import refresh_saved_token
-
-    settings = Settings()
-    store = CredentialStore(config_dir=settings.config_dir)
-    token = store.load_token()
-    if not token:
-        return
-
-    new_token = refresh_saved_token(token, settings.base_url)
-    if new_token:
-        store.save_token(new_token)
-
-
 _CHUNK_SIZE = 30
 
 
@@ -433,31 +411,20 @@ def _fetch_vm_details(client, vms_brief: list) -> list:
     単一の場合は渡されたクライアントで同期取得。
     複数の場合は parallel_get で並列化し、完了ごとにVM名を進捗表示する。
     """
-    from mdx_cli.api.spinner import _console as spin_console
     from mdx_cli.api.parallel import parallel_get
     from mdx_cli.models.vm import VM
-    from rich.status import Status
 
     if len(vms_brief) == 1:
         return [get_vm(client, vms_brief[0].uuid)]
 
-    token, base_url = _get_token_and_base()
-    total = len(vms_brief)
-    status_display = Status("", console=spin_console, spinner="dots")
-    status_display.start()
-    done_count = 0
-
-    def on_progress(idx: int) -> None:
-        nonlocal done_count
-        done_count += 1
-        name = vms_brief[idx].name
-        status_display.update(f"詳細取得中... ({done_count}/{total}) {name}")
-
+    token, base_url = get_auth_context()
     paths = [f"/api/vm/{v.uuid}/" for v in vms_brief]
-    results = parallel_get(
-        base_url, token, paths, on_progress=on_progress, return_exceptions=True
-    )
-    status_display.stop()
+    with progress_status("詳細取得中", len(vms_brief)) as progress:
+        results = parallel_get(
+            base_url, token, paths,
+            on_progress=lambda idx: progress.advance(vms_brief[idx].name),
+            return_exceptions=True,
+        )
 
     vms_detail = []
     missing = []
@@ -482,51 +449,28 @@ def _fetch_vm_details(client, vms_brief: list) -> list:
 def _wait_for_poweroff(running_vms: list, poll_interval: int = 5, max_polls: int = 60) -> None:
     """指定VMが全て PowerOFF になるまで並列ポーリングする（進捗表示付き）。"""
     import asyncio
-    from mdx_cli.api.spinner import _console as spin_console
-    from rich.status import Status
 
-    token, base_url = _get_token_and_base()
+    token, base_url = get_auth_context()
     settings = Settings()
     resolved = base_url if base_url.endswith("/") else base_url + "/"
-    total = len(running_vms)
 
-    status_display = Status("", console=spin_console, spinner="dots")
-    status_display.start()
-    done_count = 0
-    last_done_name = ""
-    status_display.update(f"停止待機中... (0/{total})")
+    with progress_status("停止待機中", len(running_vms)) as progress:
+        async def _run():
+            async with httpx.AsyncClient(
+                base_url=resolved,
+                timeout=settings.request_timeout,
+                headers={"Authorization": f"JWT {token}"},
+            ) as ac:
+                async def _poll(vm):
+                    for _ in range(max_polls):
+                        resp = await ac.get(f"/api/vm/{vm.uuid}/")
+                        if resp.json().get("status") != "PowerON":
+                            progress.advance(f"完了: {vm.name}")
+                            return
+                        await asyncio.sleep(poll_interval)
+                await asyncio.gather(*[_poll(v) for v in running_vms])
 
-    def update_display() -> None:
-        if last_done_name:
-            status_display.update(
-                f"停止待機中... ({done_count}/{total}) 完了: {last_done_name}"
-            )
-        else:
-            status_display.update(f"停止待機中... ({done_count}/{total})")
-
-    async def _run():
-        nonlocal done_count, last_done_name
-        async with httpx.AsyncClient(
-            base_url=resolved,
-            timeout=settings.request_timeout,
-            headers={"Authorization": f"JWT {token}"},
-        ) as ac:
-            async def _poll(vm):
-                nonlocal done_count, last_done_name
-                for _ in range(max_polls):
-                    resp = await ac.get(f"/api/vm/{vm.uuid}/")
-                    if resp.json().get("status") != "PowerON":
-                        done_count += 1
-                        last_done_name = vm.name
-                        update_display()
-                        return
-                    await asyncio.sleep(poll_interval)
-            await asyncio.gather(*[_poll(v) for v in running_vms])
-
-    try:
         asyncio.run(_run())
-    finally:
-        status_display.stop()
 
 
 def _check_reconfigure_homogeneity(vms: list) -> None:
@@ -562,60 +506,38 @@ def _parallel_vm_action(vms: list, action_path_fn, action_name: str, json_fn=Non
     30台ごとにトークンを事前リフレッシュしてから並列POSTする。
     長時間のバルク操作でもトークンが途中で切れない。
     """
-    from mdx_cli.api.spinner import _console as spin_console
-    from rich.status import Status
-
-    status_display = Status("", console=spin_console, spinner="dots")
-    status_display.start()
-    done_count = 0
-    total = len(vms)
-
     all_results: list[dict] = []
-    for chunk_start in range(0, total, _CHUNK_SIZE):
-        chunk = vms[chunk_start:chunk_start + _CHUNK_SIZE]
-        _refresh_token_proactive()
-        token, base_url = _get_token_and_base()
-        reqs = [{"path": action_path_fn(v), "json": json_fn(v) if json_fn else None} for v in chunk]
-
-        def on_progress(idx: int, _chunk=chunk) -> None:
-            nonlocal done_count
-            done_count += 1
-            name = _chunk[idx].name
-            status_display.update(f"{action_name}... ({done_count}/{total}) {name}")
-
-        results = parallel_post(base_url, token, reqs, on_progress=on_progress)
-        all_results.extend(results)
-
-    status_display.stop()
+    with progress_status(action_name, len(vms)) as progress:
+        for chunk_start in range(0, len(vms), _CHUNK_SIZE):
+            chunk = vms[chunk_start:chunk_start + _CHUNK_SIZE]
+            refresh_token_proactive()
+            token, base_url = get_auth_context()
+            reqs = [{"path": action_path_fn(v), "json": json_fn(v) if json_fn else None} for v in chunk]
+            results = parallel_post(
+                base_url, token, reqs,
+                on_progress=lambda idx, _chunk=chunk: progress.advance(_chunk[idx].name),
+            )
+            all_results.extend(results)
     return all_results
 
 
 def _parallel_task_wait(task_ids: list[str]) -> list[dict]:
     """複数タスクを並列ポーリングで待機する。"""
-    from mdx_cli.api.spinner import _console as spin_console
-    from rich.status import Status
-
-    token, base_url = _get_token_and_base()
+    token, base_url = get_auth_context()
     settings = Settings()
 
-    status_display = Status("", console=spin_console, spinner="dots")
-    status_display.start()
-    done_count = 0
-
-    def on_done(tid: str, data: dict) -> None:
-        nonlocal done_count
-        done_count += 1
+    def on_done(tid: str, data: dict, progress) -> None:
         name = data.get("object_name", tid[:8])
         status = data.get("status", "?")
-        status_display.update(f"タスク完了待ち... ({done_count}/{len(task_ids)}) {name}: {status}")
+        progress.advance(f"{name}: {status}")
 
-    results = parallel_wait(
-        base_url, token, task_ids,
-        poll_interval=settings.task_poll_interval,
-        timeout=settings.task_poll_timeout,
-        on_done=on_done,
-    )
-    status_display.stop()
+    with progress_status("タスク完了待ち", len(task_ids)) as progress:
+        results = parallel_wait(
+            base_url, token, task_ids,
+            poll_interval=settings.task_poll_interval,
+            timeout=settings.task_poll_timeout,
+            on_done=lambda tid, data: on_done(tid, data, progress),
+        )
     return results
 
 
@@ -1130,24 +1052,14 @@ def csv(
         vms = all_vms
 
     from mdx_cli.api.parallel import parallel_get
-    from mdx_cli.api.spinner import _console as spin_console
-    from rich.status import Status
 
-    status_display = Status("", console=spin_console, spinner="dots")
-    status_display.start()
-    done_count = 0
-
-    def on_progress(idx: int) -> None:
-        nonlocal done_count
-        done_count += 1
-        status_display.update(f"CSV取得中... ({done_count}/{len(vms)})")
-
-    settings = Settings()
-    store = CredentialStore(config_dir=settings.config_dir)
-    token = store.load_token() or ""
+    token, base_url = get_auth_context()
     paths = [f"/api/vm/{v.uuid}/csv/" for v in vms]
-    results = parallel_get(settings.base_url, token, paths, max_concurrent=50, on_progress=on_progress)
-    status_display.stop()
+    with progress_status("CSV取得中", len(vms)) as progress:
+        results = parallel_get(
+            base_url, token, paths, max_concurrent=50,
+            on_progress=lambda idx: progress.advance(),
+        )
 
     rows = [_vm_csv_row(data) for data in results]
 

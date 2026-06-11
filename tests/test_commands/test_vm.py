@@ -200,67 +200,15 @@ def test_vm_destroy_single():
                     assert result.exit_code == 0
 
 
-# --- トークン事前リフレッシュ ---
-
-
-def test_refresh_token_proactive_saves_new_token():
-    """リフレッシュ成功時は新トークンを保存する。"""
-    import httpx
-    import respx
-
-    from mdx_cli.commands.vm import _refresh_token_proactive
-    from mdx_cli.credentials.store import CredentialStore
-
-    mock_store = patch("mdx_cli.commands.vm.CredentialStore").start()
-    instance = mock_store.return_value
-    instance.load_token.return_value = "old-token"
-
-    with respx.mock(base_url="https://oprpl.mdx.jp") as router:
-        router.post("/api/refresh/").mock(
-            return_value=httpx.Response(200, json={"token": "new-token"})
-        )
-        _refresh_token_proactive()
-        instance.save_token.assert_called_once_with("new-token")
-
-    patch.stopall()
-
-
-def test_refresh_token_proactive_no_token_does_nothing():
-    """トークン未保存なら何もしない。"""
-    from mdx_cli.commands.vm import _refresh_token_proactive
-
-    with patch("mdx_cli.commands.vm.CredentialStore") as mock_store:
-        instance = mock_store.return_value
-        instance.load_token.return_value = None
-        _refresh_token_proactive()
-        instance.save_token.assert_not_called()
-
-
-def test_refresh_token_proactive_failure_does_not_raise():
-    """リフレッシュ失敗時も例外を投げず既存トークンを保持する。"""
-    import httpx
-    import respx
-
-    from mdx_cli.commands.vm import _refresh_token_proactive
-
-    with patch("mdx_cli.commands.vm.CredentialStore") as mock_store:
-        instance = mock_store.return_value
-        instance.load_token.return_value = "old-token"
-
-        with respx.mock(base_url="https://oprpl.mdx.jp") as router:
-            router.post("/api/refresh/").mock(
-                return_value=httpx.Response(400, json={"detail": "expired"})
-            )
-            _refresh_token_proactive()
-            instance.save_token.assert_not_called()
+# --- バルク操作のトークン事前リフレッシュ ---
 
 
 def test_parallel_vm_action_refreshes_token_before_bulk():
     """バルク操作の前に事前リフレッシュが呼ばれる。"""
     vm = _make_vm()
-    with patch("mdx_cli.commands.vm._refresh_token_proactive") as mock_refresh:
+    with patch("mdx_cli.commands.vm.refresh_token_proactive") as mock_refresh:
         with patch("mdx_cli.commands.vm.parallel_post", return_value=[{}]):
-            with patch("mdx_cli.commands.vm._get_token_and_base", return_value=("tok", "https://oprpl.mdx.jp")):
+            with patch("mdx_cli.commands.vm.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")):
                 from mdx_cli.commands.vm import _parallel_vm_action
                 _parallel_vm_action([vm], lambda v: f"/api/vm/{v.uuid}/stop/", "停止中")
                 mock_refresh.assert_called_once()
@@ -269,9 +217,9 @@ def test_parallel_vm_action_refreshes_token_before_bulk():
 def test_parallel_vm_action_refreshes_once_for_small_batch():
     """30台以下のバルク操作はリフレッシュ1回だけ。"""
     vms = [_make_vm(f"vm-{i}", f"uuid-{i}") for i in range(30)]
-    with patch("mdx_cli.commands.vm._refresh_token_proactive") as mock_refresh:
+    with patch("mdx_cli.commands.vm.refresh_token_proactive") as mock_refresh:
         with patch("mdx_cli.commands.vm.parallel_post", return_value=[{}] * 30):
-            with patch("mdx_cli.commands.vm._get_token_and_base", return_value=("tok", "https://oprpl.mdx.jp")):
+            with patch("mdx_cli.commands.vm.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")):
                 from mdx_cli.commands.vm import _parallel_vm_action
                 _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/stop/", "停止中")
                 assert mock_refresh.call_count == 1
@@ -281,14 +229,14 @@ def test_parallel_vm_action_refreshes_per_chunk_for_large_batch():
     """31台以上のバルク操作は30台ごとにリフレッシュ。"""
     vms = [_make_vm(f"vm-{i}", f"uuid-{i}") for i in range(75)]
 
-    with patch("mdx_cli.commands.vm._refresh_token_proactive") as mock_refresh:
+    with patch("mdx_cli.commands.vm.refresh_token_proactive") as mock_refresh:
         with patch("mdx_cli.commands.vm.parallel_post") as mock_post:
             mock_post.side_effect = [
                 [{}] * 30,
                 [{}] * 30,
                 [{}] * 15,
             ]
-            with patch("mdx_cli.commands.vm._get_token_and_base", return_value=("tok", "https://oprpl.mdx.jp")):
+            with patch("mdx_cli.commands.vm.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")):
                 from mdx_cli.commands.vm import _parallel_vm_action
                 results = _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/stop/", "停止中")
                 # 75 / 30 = 3 チャンク（30, 30, 15）→ refresh 3回
