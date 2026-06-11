@@ -26,13 +26,14 @@ from mdx_cli.commands._common import (
     resolve_project_id,
     select_from_list,
 )
+from mdx_cli.commands._deploy_plan import DeployPlan
 from mdx_cli.commands._name_pattern import (
     expand_name_pattern,
     expand_name_pattern_for_deploy,
     match_names,
 )
 from mdx_cli.console import console
-from mdx_cli.models.vm import VMDeployRequest
+from mdx_cli.models.pack import PACK_SPECS
 from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import VM_COLUMNS
 from mdx_cli.settings import Settings
@@ -190,7 +191,54 @@ def deploy(
     pid = resolve_project_id(project_id)
     client = get_client()
 
-    # --- テンプレート ---
+    selected_tmpl = _resolve_template(client, pid, template)
+    segment_uuid = _resolve_segment_for_deploy(client, pid, skip_prompt=yes)
+    shared_key = _resolve_ssh_key(key)
+    name_pattern = _resolve_name_pattern(name)
+    pack_type = _resolve_pack_type(pack_type_opt)
+    spec = PACK_SPECS[pack_type]
+
+    if pack_num_opt is not None:
+        pack_num = pack_num_opt
+    else:
+        pack_num = int(questionary.text(
+            f"パック数 (最大{spec.max_num}):", default=str(spec.default_num)
+        ).unsafe_ask())
+
+    if disk is not None:
+        disk_size = disk
+    else:
+        disk_size = int(questionary.text(
+            "ディスクサイズ(GB):", default=str(selected_tmpl.lower_limit_disk)
+        ).unsafe_ask())
+
+    service_level = _resolve_service_level(service_level_opt)
+
+    if not power_on and not yes:
+        power_on = questionary.confirm("デプロイ後に自動起動しますか？", default=False).unsafe_ask()
+
+    plan = DeployPlan(
+        template=selected_tmpl,
+        segment_uuid=segment_uuid,
+        name_pattern=name_pattern,
+        disk_size=disk_size,
+        pack_type=pack_type,
+        pack_num=pack_num,
+        service_level=service_level,
+        shared_key=shared_key,
+        power_on=power_on,
+    )
+
+    _print_deploy_summary(plan)
+    if not yes:
+        if not questionary.confirm("\nデプロイしますか？").unsafe_ask():
+            raise typer.Abort()
+
+    _execute_deploy(client, plan, pid, no_wait=no_wait)
+
+
+def _resolve_template(client, pid: str, template: str | None):
+    """テンプレートを解決する。指定があれば部分一致、なければ一覧から選択。"""
     templates = list_templates(client, pid)
     stop_active_spinner()
 
@@ -198,31 +246,35 @@ def deploy(
         matched = [t for t in templates if template.lower() in t.name.lower()]
         if not matched:
             fail(f"テンプレート '{template}' が見つかりません")
-        selected_tmpl = matched[0]
-    else:
-        console.print("\n[bold]テンプレート:[/bold]")
-        for i, t in enumerate(templates, 1):
-            os_info = f" [cyan]{t.os_name or ''} {t.os_version or ''}[/cyan]" if t.os_name else ""
-            gpu = " [red]GPU必須[/red]" if t.gpu_required else ""
-            disk_info = f" [dim]disk≥{t.lower_limit_disk}GB[/dim]"
-            console.print(f"  {i}) {t.name}{os_info}{gpu}{disk_info}")
-            if t.description:
-                console.print(f"     [dim]{t.description}[/dim]")
-        tmpl_idx = int(questionary.text("\n番号を入力:").unsafe_ask()) - 1
-        selected_tmpl = templates[tmpl_idx]
+        return matched[0]
 
-    # --- セグメント ---
+    if not templates:
+        fail("テンプレートがありません")
+
+    def _format(t) -> str:
+        os_info = f" [cyan]{t.os_name or ''} {t.os_version or ''}[/cyan]" if t.os_name else ""
+        gpu = " [red]GPU必須[/red]" if t.gpu_required else ""
+        line = f"{t.name}{os_info}{gpu} [dim]disk≥{t.lower_limit_disk}GB[/dim]"
+        if t.description:
+            line += f"\n     [dim]{t.description}[/dim]"
+        return line
+
+    return select_from_list(templates, _format, title="テンプレート:")
+
+
+def _resolve_segment_for_deploy(client, pid: str, skip_prompt: bool) -> str:
+    """デプロイ先セグメントを解決する。複数あれば選択（-y 時は先頭）。"""
     segments = list_segments(client, pid)
     stop_active_spinner()
-    selected_seg = segments[0]
-    if len(segments) > 1 and not yes:
-        console.print("\n[bold]セグメント:[/bold]")
-        for i, s in enumerate(segments, 1):
-            console.print(f"  {i}) {s.name}")
-        seg_idx = int(questionary.text("番号を入力:").unsafe_ask()) - 1
-        selected_seg = segments[seg_idx]
+    if not segments:
+        fail("セグメントがありません")
+    if len(segments) == 1 or skip_prompt:
+        return segments[0].uuid
+    return select_from_list(segments, lambda s: s.name, title="セグメント:").uuid
 
-    # --- SSH公開鍵 ---
+
+def _resolve_ssh_key(key: str | None) -> str:
+    """SSH公開鍵の内容を解決する。未指定なら ~/.ssh の一覧から選択。"""
     if key:
         key_path = Path(key).expanduser()
     else:
@@ -236,8 +288,7 @@ def deploy(
             console.print("[dim]  番号で選択、または絶対パス/~/... を直接入力[/dim]")
             answer = questionary.text("番号またはパス:", default="1").unsafe_ask()
             if answer.strip().isdigit() and 1 <= int(answer) <= len(pubkeys):
-                idx = int(answer)
-                key_path = pubkeys[idx - 1]
+                key_path = pubkeys[int(answer) - 1]
                 console.print(f"[green]{key_path.name} が選択されました[/green]")
             else:
                 key_path = Path(answer).expanduser()
@@ -250,17 +301,20 @@ def deploy(
         fail("絶対パスまたは ~/... で指定してください")
     if not key_path.exists():
         fail(f"ファイルが見つかりません: {key_path}")
-    shared_key = key_path.read_text().strip()
+    return key_path.read_text().strip()
 
-    # --- VM名 ---
+
+def _resolve_name_pattern(name: str | None) -> str:
+    """VM名パターンを解決し、複数台のときは展開結果の概要を表示する。"""
     if name:
-        vm_name_pattern = name
+        pattern = name
     else:
         console.print("\n[bold]VM名[/bold]")
         console.print("[dim]  パターンで一括作成: my-vm-{0-9} → 10台 (1リクエスト), name-{a-c}-{0-9} → 30台 (3リクエスト)[/dim]")
-        vm_name_pattern = questionary.text("VM名:").unsafe_ask()
-    vm_names = expand_name_pattern(vm_name_pattern)
-    deploy_patterns = expand_name_pattern_for_deploy(vm_name_pattern)
+        pattern = questionary.text("VM名:").unsafe_ask()
+
+    vm_names = expand_name_pattern(pattern)
+    deploy_patterns = expand_name_pattern_for_deploy(pattern)
     if len(vm_names) > 1:
         if len(deploy_patterns) < len(vm_names):
             console.print(
@@ -269,93 +323,62 @@ def deploy(
             )
         else:
             console.print(f"  → {len(vm_names)}台: {vm_names[0]} 〜 {vm_names[-1]}")
+    return pattern
 
-    # --- パックタイプ ---
+
+def _resolve_pack_type(pack_type_opt: str | None) -> str:
     if pack_type_opt:
-        pack_type = pack_type_opt
-    else:
-        pack_type = questionary.select(
-            "パックタイプ:",
-            choices=[
-                Choice("cpu（1パック = 1コア / 1.51GB RAM）", value="cpu"),
-                Choice("gpu（1パック = 18コア / 1GPU / 57.6GB RAM / 40GB VRAM）", value="gpu"),
-            ],
-        ).unsafe_ask()
+        if pack_type_opt not in PACK_SPECS:
+            fail(f"不明なパックタイプです: {pack_type_opt}（cpu / gpu）")
+        return pack_type_opt
+    return questionary.select(
+        "パックタイプ:",
+        choices=[
+            Choice("cpu（1パック = 1コア / 1.51GB RAM）", value="cpu"),
+            Choice("gpu（1パック = 18コア / 1GPU / 57.6GB RAM / 40GB VRAM）", value="gpu"),
+        ],
+    ).unsafe_ask()
 
-    max_pack = 152 if pack_type == "cpu" else 8
-    mem_per_pack = 1.51 if pack_type == "cpu" else 57.60
 
-    # --- パック数 ---
-    if pack_num_opt is not None:
-        pack_num = pack_num_opt
-    else:
-        default_pack = "3" if pack_type == "cpu" else "1"
-        pack_num = int(questionary.text(f"パック数 (最大{max_pack}):", default=default_pack).unsafe_ask())
-
-    # --- ディスク ---
-    if disk is not None:
-        disk_size = disk
-    else:
-        disk_size = int(questionary.text("ディスクサイズ(GB):", default=str(selected_tmpl.lower_limit_disk)).unsafe_ask())
-
-    # --- サービスレベル ---
+def _resolve_service_level(service_level_opt: str | None) -> str:
     if service_level_opt:
-        service_level = service_level_opt
-    else:
-        service_level = questionary.select(
-            "サービスレベル:",
-            choices=[
-                Choice("spot（低価格・中断あり）", value="spot"),
-                Choice("guarantee（高価格・中断なし）", value="guarantee"),
-            ],
-        ).unsafe_ask()
+        return service_level_opt
+    return questionary.select(
+        "サービスレベル:",
+        choices=[
+            Choice("spot（低価格・中断あり）", value="spot"),
+            Choice("guarantee（高価格・中断なし）", value="guarantee"),
+        ],
+    ).unsafe_ask()
 
-    # --- 自動起動 ---
-    if not power_on and not yes:
-        power_on = questionary.confirm("デプロイ後に自動起動しますか？", default=False).unsafe_ask()
 
-    # --- 確認 ---
-    total_mem = pack_num * mem_per_pack
+def _print_deploy_summary(plan: DeployPlan) -> None:
+    vm_names = plan.vm_names
     console.print(f"\n[bold]デプロイ内容:[/bold]")
-    console.print(f"  テンプレート: {selected_tmpl.name}")
-    console.print(f"  ディスク:     {disk_size}GB / {pack_type} x {pack_num} / {service_level}")
-    console.print(f"  自動起動:     {'あり' if power_on else 'なし'}")
+    console.print(f"  テンプレート: {plan.template.name}")
+    console.print(f"  ディスク:     {plan.disk_size}GB / {plan.pack_type} x {plan.pack_num} / {plan.service_level}")
+    console.print(f"  自動起動:     {'あり' if plan.power_on else 'なし'}")
     if len(vm_names) == 1:
         console.print(f"  VM名:         {vm_names[0]}")
     else:
         console.print(f"  VM数:         {len(vm_names)}台 ({vm_names[0]} 〜 {vm_names[-1]})")
 
-    if not yes:
-        if not questionary.confirm("\nデプロイしますか？").unsafe_ask():
-            raise typer.Abort()
 
-    # --- デプロイ実行（直列、API範囲記法でリクエスト集約） ---
+def _execute_deploy(client, plan: DeployPlan, pid: str, no_wait: bool) -> None:
+    """デプロイ実行（直列、API範囲記法でリクエスト集約）。"""
+    requests = plan.to_requests(pid)
     task_ids: list[str] = []
-    for i, pattern in enumerate(deploy_patterns, 1):
-        req = VMDeployRequest(
-            catalog=selected_tmpl.uuid,
-            project=pid,
-            vm_name=pattern,
-            disk_size=disk_size,
-            pack_type=pack_type,
-            pack_num=pack_num,
-            service_level=service_level,
-            network_adapters=[{"adapter_number": 1, "segment": selected_seg.uuid}],
-            shared_key=shared_key,
-            template_name=selected_tmpl.template_name or selected_tmpl.name,
-            os_type=selected_tmpl.os_type or "Linux",
-            power_on=power_on,
-        )
+    for i, req in enumerate(requests, 1):
         resp = deploy_vm(client, req)
         task_ids.extend(resp.task_id)
         stop_active_spinner()
         if len(resp.task_id) > 1:
             console.print(
-                f"  [green]✓[/green] ({i}/{len(deploy_patterns)}) {pattern} → {len(resp.task_id)}台分のタスクID"
+                f"  [green]✓[/green] ({i}/{len(requests)}) {req.vm_name} → {len(resp.task_id)}台分のタスクID"
             )
         else:
             console.print(
-                f"  [green]✓[/green] ({i}/{len(deploy_patterns)}) {pattern} → タスク: {resp.task_id[0]}"
+                f"  [green]✓[/green] ({i}/{len(requests)}) {req.vm_name} → タスク: {resp.task_id[0]}"
             )
 
     console.print(f"\n{len(task_ids)}台のデプロイを開始しました")
@@ -726,25 +749,14 @@ def reconfigure(
 
     pack_type = ref_extra.get("pack_type", "cpu")
     current_pack_num = ref_extra.get("pack_num", 3)
-    if pack_type == "cpu":
-        max_pack = 152
-        mem_per_pack = 1.51
-    else:
-        max_pack = 8
-        mem_per_pack = 57.60
+    spec = PACK_SPECS.get(pack_type, PACK_SPECS["cpu"])
 
     new_pack_num = int(questionary.text(
-        f"パック数 ({pack_type}, 最大{max_pack}):",
+        f"パック数 ({pack_type}, 最大{spec.max_num}):",
         default=str(current_pack_num),
     ).unsafe_ask())
 
-    new_total_mem = new_pack_num * mem_per_pack
-    if pack_type == "cpu":
-        console.print(f"  → [cyan]{new_pack_num}コア / {new_total_mem:.1f}GB RAM[/cyan]")
-    else:
-        console.print(
-            f"  → [cyan]{new_pack_num * 18}コア / {new_pack_num}GPU / {new_total_mem:.1f}GB RAM[/cyan]"
-        )
+    console.print(f"  → [cyan]{spec.resource_summary(new_pack_num)}[/cyan]")
 
     # ディスク新容量（代表VMの各ディスク分を聞き、全VMに同一適用）
     new_capacities: list[int] = []
