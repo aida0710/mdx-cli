@@ -177,14 +177,3 @@ def sso_login(
 
     logger.error("JWTトークンの取得に失敗しました")
     return None
-
-
-def refresh_token(client: httpx.Client, token: str) -> str | None:
-    """POST /api/refresh/ でJWTトークンをリフレッシュする。"""
-    logger.debug("POST %s/api/refresh/", client.base_url)
-    resp = client.post("/api/refresh/", json={"token": token})
-    logger.debug("→ %d %s", resp.status_code, resp.text[:500])
-
-    if resp.status_code == 200:
-        return resp.json().get("token")
-    return None
