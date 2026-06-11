@@ -3,7 +3,6 @@ from typing import NamedTuple
 
 import questionary
 import typer
-from rich.status import Status
 
 from mdx_cli.api.endpoints.networks import (
     delete_acl,
@@ -14,15 +13,19 @@ from mdx_cli.api.endpoints.networks import (
     list_dnats,
     list_segments,
 )
-from mdx_cli.api.endpoints.vms import get_vm, list_vms
+from mdx_cli.api.endpoints.vms import list_vms
 from mdx_cli.api.parallel import parallel_get
-from mdx_cli.api.spinner import _console as spin_console, stop_active_spinner
-from mdx_cli.commands._common import get_client, resolve_project_id, resolve_segment_id
-from mdx_cli.credentials.store import CredentialStore
+from mdx_cli.api.spinner import progress_status, stop_active_spinner
+from mdx_cli.commands._common import (
+    get_auth_context,
+    get_client,
+    resolve_project_id,
+    resolve_segment_id,
+)
+from mdx_cli.console import console
 from mdx_cli.models.network import ACL
-from mdx_cli.output.formatting import console, render
+from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import SEGMENT_COLUMNS, SEGMENT_SUMMARY_COLUMNS
-from mdx_cli.settings import Settings
 
 from mdx_cli.commands.acl import app as acl_app
 from mdx_cli.commands.dnat import app as dnat_app
@@ -54,29 +57,16 @@ def _collect_vm_ip_maps(client, pid: str, json_mode: bool) -> VmIpMaps:
     stop_active_spinner()
     active_vms = [v for v in vms if v.status != "Deallocated"]
 
-    status_display = Status("", console=spin_console, spinner="dots") if not json_mode else None
-    if status_display:
-        status_display.start()
-    done_count = 0
-
-    def on_progress(idx: int) -> None:
-        nonlocal done_count
-        done_count += 1
-        if status_display:
-            status_display.update(f"VM詳細を取得中... ({done_count}/{len(active_vms)})")
-
-    settings = Settings()
-    store = CredentialStore(config_dir=settings.config_dir)
-    token = store.load_token() or ""
+    token, base_url = get_auth_context()
     paths = [f"/api/vm/{v.uuid}/" for v in active_vms]
-    results = parallel_get(
-        settings.base_url, token, paths,
-        # VM詳細APIは応答が遅く、高並列だと過負荷でタイムアウトが多発するため低めに抑える
-        max_concurrent=8, on_progress=on_progress,
-        return_exceptions=True,
-    )
-    if status_display:
-        status_display.stop()
+    with progress_status("VM詳細を取得中", len(active_vms), enabled=not json_mode) as progress:
+        results = parallel_get(
+            base_url, token, paths,
+            # VM詳細APIは応答が遅く、高並列だと過負荷でタイムアウトが多発するため低めに抑える
+            max_concurrent=8,
+            on_progress=lambda idx: progress.advance(),
+            return_exceptions=True,
+        )
 
     global_ip_to_vm: dict[str, str] = {}
     private_ip_to_vm: dict[str, str] = {}
@@ -108,28 +98,14 @@ def _collect_segment_acls(client, segments, json_mode: bool) -> list[list]:
     """
     if not segments:
         return []
-    settings = Settings()
-    store = CredentialStore(config_dir=settings.config_dir)
-    token = store.load_token() or ""
-
-    status_display = Status("", console=spin_console, spinner="dots") if not json_mode else None
-    if status_display:
-        status_display.start()
-    done = 0
-
-    def on_progress(idx: int) -> None:
-        nonlocal done
-        done += 1
-        if status_display:
-            status_display.update(f"ACL取得中... ({done}/{len(segments)})")
-
+    token, base_url = get_auth_context()
     paths = [f"/api/acl/segment/{s.uuid}/?page_size=100" for s in segments]
-    results = parallel_get(
-        settings.base_url, token, paths,
-        on_progress=on_progress, return_exceptions=True,
-    )
-    if status_display:
-        status_display.stop()
+    with progress_status("ACL取得中", len(segments), enabled=not json_mode) as progress:
+        results = parallel_get(
+            base_url, token, paths,
+            on_progress=lambda idx: progress.advance(),
+            return_exceptions=True,
+        )
 
     acl_lists: list[list] = []
     needs_full: list[int] = []
