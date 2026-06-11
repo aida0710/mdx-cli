@@ -390,3 +390,54 @@ def test_check_acl_keeps_on_decline():
     assert result.exit_code == 0, result.output
     mock_delete.assert_not_called()
     mock_q.confirm.assert_called_once()
+
+def test_check_ip_json_fix_deletes_and_keeps_stdout_json():
+    """--json --fix でも削除が実行され、stdout は有効なJSONのまま"""
+    dnats = [
+        DNAT(uuid="d-hole", pool_address="203.0.113.20", segment="s", dst_address="10.15.0.99"),
+    ]
+    with patch("mdx_cli.commands.network.list_assignable_ips", return_value=[]), \
+         patch("mdx_cli.commands.network.list_dnats", return_value=dnats), \
+         patch("mdx_cli.commands.network.list_vms", return_value=[
+             VM(uuid="vm-1", name="web-1", status="PowerON")
+         ]), \
+         patch("mdx_cli.commands.network.parallel_get", return_value=[
+             {"service_networks": [{"global_ip": "", "ipv4_address": ["10.15.0.5"]}]}
+         ]), \
+         patch("mdx_cli.commands.network.delete_dnat") as mock_delete, \
+         patch("mdx_cli.commands.network.get_client"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
+         patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"):
+        result = runner.invoke(app, ["check-ip", "--project-id", "proj-1", "--json", "--fix"])
+    assert result.exit_code == 0, result.output
+    mock_delete.assert_called_once()
+    assert mock_delete.call_args[0][1] == "d-hole"
+    # stdout は有効なJSON（削除メッセージは stderr に出る）
+    json.loads(result.stdout)
+
+
+def test_check_acl_json_fix_deletes_holes():
+    """--json --fix でも穴ACLの削除が実行され、stdout は有効なJSONのまま"""
+    seg = Segment(uuid="seg-1", name="seg1")
+    acls = [
+        ACL(uuid="a-hole", protocol="TCP", src_address="0.0.0.0", src_mask="0",
+            src_port="Any", dst_address="10.15.0.99", dst_mask="255.255.255.255",
+            dst_port="22"),
+    ]
+    with patch("mdx_cli.commands.network.list_segments", return_value=[seg]), \
+         patch("mdx_cli.commands.network._collect_segment_acls", return_value=[acls]), \
+         patch("mdx_cli.commands.network.list_vms", return_value=[
+             VM(uuid="vm-1", name="web-1", status="PowerON")
+         ]), \
+         patch("mdx_cli.commands.network.parallel_get", return_value=[
+             {"service_networks": [{"global_ip": "", "ipv4_address": ["10.15.0.5"]}]}
+         ]), \
+         patch("mdx_cli.commands.network.delete_acl") as mock_delete, \
+         patch("mdx_cli.commands.network.get_client"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
+         patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"):
+        result = runner.invoke(app, ["check-acl", "--project-id", "proj-1", "--json", "--fix"])
+    assert result.exit_code == 0, result.output
+    mock_delete.assert_called_once()
+    assert mock_delete.call_args[0][1] == "a-hole"
+    json.loads(result.stdout)
