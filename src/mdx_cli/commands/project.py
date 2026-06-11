@@ -50,27 +50,27 @@ def summary_cmd(
     guarantee = overview["guarantee_vm"]
     resource = overview["resource"]
 
-    console.print(f"\n[bold]VM（スポット）:[/bold]")
+    console.print("\n[bold]VM（スポット）:[/bold]")
     console.print(f"  [green]稼働中: {spot['power_on']}[/green]  停止: {spot['power_off']}  未割当: {spot['deallocated']}  合計: {spot['total']}")
 
     if guarantee["total"] > 0:
-        console.print(f"\n[bold]VM（保証）:[/bold]")
+        console.print("\n[bold]VM（保証）:[/bold]")
         console.print(f"  [green]稼働中: {guarantee['power_on']}[/green]  停止: {guarantee['power_off']}  未割当: {guarantee['deallocated']}  合計: {guarantee['total']}")
 
     disk = resource.get("disk_size", {})
     used = disk.get("used", 0)
     unused = disk.get("unused", 0)
     total_disk = used + unused
-    console.print(f"\n[bold]VMディスク:[/bold]")
+    console.print("\n[bold]VMディスク:[/bold]")
     console.print(f"  使用: {used:.0f} GB / {total_disk:.0f} GB（残り {unused:.0f} GB）")
 
     cpu = resource.get("cpu_pack", {})
     gpu = resource.get("gpu_pack", {})
     if cpu.get("used", 0) > 0 or cpu.get("unused", 0) > 0:
-        console.print(f"\n[bold]CPUパック:[/bold]")
+        console.print("\n[bold]CPUパック:[/bold]")
         console.print(f"  使用: {cpu['used']}  未使用: {cpu['unused']}")
     if gpu.get("used", 0) > 0 or gpu.get("unused", 0) > 0:
-        console.print(f"\n[bold]GPUパック:[/bold]")
+        console.print("\n[bold]GPUパック:[/bold]")
         console.print(f"  使用: {gpu['used']}  未使用: {gpu['unused']}")
 
     # ストレージ情報

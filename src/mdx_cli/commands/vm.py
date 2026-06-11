@@ -22,6 +22,7 @@ from mdx_cli.commands._common import (
     get_auth_context,
     get_client,
     is_uuid,
+    prompt_int,
     refresh_token_proactive,
     resolve_project_id,
     select_from_list,
@@ -110,14 +111,14 @@ def show(
     # ディスク
     disks = vm.hard_disks
     if disks:
-        console.print(f"\n[bold]ディスク:[/bold]")
+        console.print("\n[bold]ディスク:[/bold]")
         for d in disks:
             console.print(f"  #{d.get('disk_number', '?')}: {d.get('capacity', '?')} ({d.get('datastore', '')})")
 
     # ネットワーク
     nets = vm.service_networks
     if nets:
-        console.print(f"\n[bold]ネットワーク:[/bold]")
+        console.print("\n[bold]ネットワーク:[/bold]")
         for n in nets:
             ipv4 = ", ".join(n.get("ipv4_address", []))
             gip = n.get("global_ip", "")
@@ -131,7 +132,7 @@ def show(
     # ストレージネットワーク
     snets = vm.storage_networks
     if snets:
-        console.print(f"\n[bold]ストレージネットワーク:[/bold]")
+        console.print("\n[bold]ストレージネットワーク:[/bold]")
         for sn in snets:
             ipv4 = ", ".join(sn.get("ipv4_address", []))
             console.print(f"  アダプタ {sn.get('adapter_number', '?')}: {ipv4} ({sn.get('storage_network_type', '')})")
@@ -139,7 +140,7 @@ def show(
     # VMware Tools
     tools = extra.get("vmware_tools", {})
     if tools:
-        console.print(f"\n[bold]VMware Tools:[/bold]")
+        console.print("\n[bold]VMware Tools:[/bold]")
         console.print(f"  状態:     {tools.get('status', '-')}")
         console.print(f"  バージョン: {tools.get('version', '-')}")
 
@@ -199,18 +200,22 @@ def deploy(
     spec = PACK_SPECS[pack_type]
 
     if pack_num_opt is not None:
+        if not 1 <= pack_num_opt <= spec.max_num:
+            fail(f"パック数は 1〜{spec.max_num} の範囲で指定してください")
         pack_num = pack_num_opt
     else:
-        pack_num = int(questionary.text(
-            f"パック数 (最大{spec.max_num}):", default=str(spec.default_num)
-        ).unsafe_ask())
+        pack_num = prompt_int(
+            f"パック数 (最大{spec.max_num}):",
+            max_val=spec.max_num,
+            default=str(spec.default_num),
+        )
 
     if disk is not None:
         disk_size = disk
     else:
-        disk_size = int(questionary.text(
+        disk_size = prompt_int(
             "ディスクサイズ(GB):", default=str(selected_tmpl.lower_limit_disk)
-        ).unsafe_ask())
+        )
 
     service_level = _resolve_service_level(service_level_opt)
 
@@ -354,7 +359,7 @@ def _resolve_service_level(service_level_opt: str | None) -> str:
 
 def _print_deploy_summary(plan: DeployPlan) -> None:
     vm_names = plan.vm_names
-    console.print(f"\n[bold]デプロイ内容:[/bold]")
+    console.print("\n[bold]デプロイ内容:[/bold]")
     console.print(f"  テンプレート: {plan.template.name}")
     console.print(f"  ディスク:     {plan.disk_size}GB / {plan.pack_type} x {plan.pack_num} / {plan.service_level}")
     console.print(f"  自動起動:     {'あり' if plan.power_on else 'なし'}")
@@ -454,8 +459,12 @@ def _fetch_vm_details(client, vms_brief: list) -> list:
     return vms_detail
 
 
-def _wait_for_poweroff(running_vms: list, poll_interval: int = 5, max_polls: int = 60) -> None:
-    """指定VMが全て PowerOFF になるまで並列ポーリングする（進捗表示付き）。"""
+def _wait_for_poweroff(running_vms: list, poll_interval: int = 5, max_polls: int = 60) -> list:
+    """指定VMが全て PowerOFF になるまで並列ポーリングする（進捗表示付き）。
+
+    戻り値: タイムアウト（poll_interval × max_polls）までに停止を
+    確認できなかったVMのリスト。空なら全台停止。
+    """
     import asyncio
 
     token, base_url = get_auth_context()
@@ -474,11 +483,37 @@ def _wait_for_poweroff(running_vms: list, poll_interval: int = 5, max_polls: int
                         resp = await ac.get(f"/api/vm/{vm.uuid}/")
                         if resp.json().get("status") != "PowerON":
                             progress.advance(f"完了: {vm.name}")
-                            return
+                            return None
                         await asyncio.sleep(poll_interval)
-                await asyncio.gather(*[_poll(v) for v in running_vms])
+                    return vm
+                return await asyncio.gather(*[_poll(v) for v in running_vms])
 
-        asyncio.run(_run())
+        results = asyncio.run(_run())
+
+    return [v for v in results if v is not None]
+
+
+def _ensure_stopped(running_vms: list) -> None:
+    """VMの停止完了を待ち、確認できなかったVMがあれば警告して続行確認する。
+
+    稼働中VMへの destroy / reconfigure はAPI側で失敗するため、
+    黙って先へ進まず default=False で確認を挟む。
+    """
+    still_running = _wait_for_poweroff(running_vms)
+    if not still_running:
+        console.print("  → 停止完了")
+        return
+
+    console.print(
+        f"\n[yellow]⚠ {len(still_running)}台の停止をタイムアウトまでに確認できませんでした:[/yellow]"
+    )
+    for v in still_running:
+        console.print(f"  {v.name} [dim]({v.uuid})[/dim]")
+    if not questionary.confirm(
+        "このまま続行しますか？（稼働中のVMは操作に失敗する可能性があります）",
+        default=False,
+    ).unsafe_ask():
+        raise typer.Abort()
 
 
 def _check_reconfigure_homogeneity(vms: list) -> None:
@@ -737,20 +772,20 @@ def reconfigure(
         _parallel_vm_action(
             running_vms, lambda v: vm_action_path(v.uuid, "shutdown"), "シャットダウン中"
         )
-        _wait_for_poweroff(running_vms)
-        console.print(f"  → 停止完了")
+        _ensure_stopped(running_vms)
 
     # 新しい構成を入力
-    console.print(f"\n[bold]新しい構成（Enterで変更なし）:[/bold]")
+    console.print("\n[bold]新しい構成（Enterで変更なし）:[/bold]")
 
     pack_type = ref.pack_type or "cpu"
     current_pack_num = ref.pack_num if ref.pack_num is not None else 3
     spec = PACK_SPECS.get(pack_type, PACK_SPECS["cpu"])
 
-    new_pack_num = int(questionary.text(
+    new_pack_num = prompt_int(
         f"パック数 ({pack_type}, 最大{spec.max_num}):",
+        max_val=spec.max_num,
         default=str(current_pack_num),
-    ).unsafe_ask())
+    )
 
     console.print(f"  → [cyan]{spec.resource_summary(new_pack_num)}[/cyan]")
 
@@ -762,14 +797,14 @@ def reconfigure(
             current_cap_int = int(float(current_cap))
         except (ValueError, TypeError):
             current_cap_int = 40
-        new_cap = int(questionary.text(
+        new_cap = prompt_int(
             f"ディスク #{d.get('disk_number', '?')} (GB):",
             default=str(current_cap_int),
-        ).unsafe_ask())
+        )
         new_capacities.append(new_cap)
 
     # 確認
-    console.print(f"\n[bold]変更内容:[/bold]")
+    console.print("\n[bold]変更内容:[/bold]")
     console.print(
         f"  パック: {pack_type} x {current_pack_num} → {new_pack_num}"
     )
@@ -870,8 +905,7 @@ def destroy(
     if running_vms:
         _parallel_vm_action(running_vms, lambda v: vm_action_path(v.uuid, "power_off"), "停止中")
         console.print(f"  {len(running_vms)}台の停止リクエスト送信完了")
-        _wait_for_poweroff(running_vms)
-        console.print(f"  → 停止完了")
+        _ensure_stopped(running_vms)
         console.print("")
 
     # 並列削除

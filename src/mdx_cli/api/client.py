@@ -22,9 +22,9 @@ def _make_relogin_fn(settings: Settings):
     """保存済みID/PWを使い、OTPだけプロンプトして再ログインする関数を返す。"""
     def relogin() -> str | None:
         from mdx_cli.api.endpoints.auth import sso_login
-        from mdx_cli.credentials.store import CredentialStore
+        from mdx_cli.credentials.store import get_store
 
-        store = CredentialStore(config_dir=settings.config_dir)
+        store = get_store()
         creds = store.load_credentials()
         if not creds:
             return None

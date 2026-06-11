@@ -224,7 +224,7 @@ def check_ip(
             result.append({"ip": ip, "status": status, "usage": usage})
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
-        console.print(f"\n[bold]グローバルIPv4 使用状況:[/bold]\n")
+        console.print("\n[bold]グローバルIPv4 使用状況:[/bold]\n")
         for ip in all_ips:
             if ip in vm_map:
                 console.print(f"  {ip}  [cyan]{vm_map[ip]}[/cyan]")

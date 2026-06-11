@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -150,7 +150,6 @@ def test_parallel_get_return_exceptions_partial_failure():
 @respx.mock
 def test_parallel_get_default_raises_on_persistent_failure():
     """return_exceptions=False（デフォルト）なら例外がraiseされる。"""
-    import pytest
     respx.get("https://oprpl.mdx.jp/api/vm/vm-bad/").mock(
         return_value=httpx.Response(500)
     )
