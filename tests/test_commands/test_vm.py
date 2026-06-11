@@ -1,10 +1,13 @@
 import json
-from unittest.mock import patch, call
+from pathlib import Path
+from unittest.mock import patch
 
 from typer.testing import CliRunner
 
-from mdx_cli.commands.vm import app
-from mdx_cli.models.vm import VM
+from mdx_cli.commands.vm import _list_pubkeys, _pubkey_preview, app
+from mdx_cli.models.network import Segment
+from mdx_cli.models.template import Template
+from mdx_cli.models.vm import VM, VMDeployResponse
 
 runner = CliRunner()
 
@@ -247,11 +250,7 @@ def test_parallel_vm_action_refreshes_per_chunk_for_large_batch():
 
 # --- deploy コマンド ---
 
-from pathlib import Path
 
-from mdx_cli.models.template import Template
-from mdx_cli.models.network import Segment
-from mdx_cli.models.vm import VMDeployResponse
 
 
 def _make_template():
@@ -382,7 +381,6 @@ def test_vm_deploy_zero_padded_does_not_aggregate(tmp_path):
 
 # --- SSH公開鍵 一覧/警告 ---
 
-from mdx_cli.commands.vm import _list_pubkeys
 
 
 def test_list_pubkeys_orders_standard_keys_first(tmp_path):
@@ -412,7 +410,6 @@ def test_list_pubkeys_returns_empty_when_no_ssh_dir(tmp_path):
         assert _list_pubkeys() == []
 
 
-from mdx_cli.commands.vm import _pubkey_preview
 
 
 def test_pubkey_preview_abbreviates_long_content(tmp_path):

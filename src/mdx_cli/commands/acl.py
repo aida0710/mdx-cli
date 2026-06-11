@@ -68,7 +68,7 @@ def acl_add(
     if protocol != "ICMP":
         dst_port = questionary.text("宛先ポート:", default="Any").unsafe_ask()
 
-    console.print(f"\n[bold]確認:[/bold]")
+    console.print("\n[bold]確認:[/bold]")
     console.print(f"  プロトコル: {protocol}")
     console.print(f"  送信元:     {src_address}/{src_mask} :{src_port}")
     console.print(f"  宛先:       {dst_address}/{dst_mask} :{dst_port}")
@@ -119,7 +119,7 @@ def acl_edit(
             fail(f"ACL {acl_id} が見つかりません")
 
     # 現在値を表示して編集
-    console.print(f"\n[bold]現在の値（Enterでそのまま）:[/bold]")
+    console.print("\n[bold]現在の値（Enterでそのまま）:[/bold]")
     protocol = questionary.select(
         "プロトコル:",
         choices=["TCP", "UDP", "ICMP"],
@@ -136,7 +136,7 @@ def acl_edit(
     if protocol != "ICMP":
         dst_port = questionary.text("宛先ポート:", default=selected.dst_port).unsafe_ask()
 
-    console.print(f"\n[bold]変更後:[/bold]")
+    console.print("\n[bold]変更後:[/bold]")
     console.print(f"  プロトコル: {protocol}")
     console.print(f"  送信元:     {src_address}/{src_mask} :{src_port}")
     console.print(f"  宛先:       {dst_address}/{dst_mask} :{dst_port}")

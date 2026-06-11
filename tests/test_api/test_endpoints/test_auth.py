@@ -1,7 +1,6 @@
 from unittest.mock import patch
 
 import httpx
-import respx
 
 from mdx_cli.api.endpoints.auth import _parse_form, sso_login
 

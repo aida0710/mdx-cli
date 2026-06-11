@@ -1,5 +1,3 @@
-import json
-from pathlib import Path
 
 from mdx_cli.credentials.store import CredentialStore
 
