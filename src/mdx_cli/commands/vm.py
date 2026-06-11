@@ -454,8 +454,12 @@ def _fetch_vm_details(client, vms_brief: list) -> list:
     return vms_detail
 
 
-def _wait_for_poweroff(running_vms: list, poll_interval: int = 5, max_polls: int = 60) -> None:
-    """指定VMが全て PowerOFF になるまで並列ポーリングする（進捗表示付き）。"""
+def _wait_for_poweroff(running_vms: list, poll_interval: int = 5, max_polls: int = 60) -> list:
+    """指定VMが全て PowerOFF になるまで並列ポーリングする（進捗表示付き）。
+
+    戻り値: タイムアウト（poll_interval × max_polls）までに停止を
+    確認できなかったVMのリスト。空なら全台停止。
+    """
     import asyncio
 
     token, base_url = get_auth_context()
@@ -474,11 +478,37 @@ def _wait_for_poweroff(running_vms: list, poll_interval: int = 5, max_polls: int
                         resp = await ac.get(f"/api/vm/{vm.uuid}/")
                         if resp.json().get("status") != "PowerON":
                             progress.advance(f"完了: {vm.name}")
-                            return
+                            return None
                         await asyncio.sleep(poll_interval)
-                await asyncio.gather(*[_poll(v) for v in running_vms])
+                    return vm
+                return await asyncio.gather(*[_poll(v) for v in running_vms])
 
-        asyncio.run(_run())
+        results = asyncio.run(_run())
+
+    return [v for v in results if v is not None]
+
+
+def _ensure_stopped(running_vms: list) -> None:
+    """VMの停止完了を待ち、確認できなかったVMがあれば警告して続行確認する。
+
+    稼働中VMへの destroy / reconfigure はAPI側で失敗するため、
+    黙って先へ進まず default=False で確認を挟む。
+    """
+    still_running = _wait_for_poweroff(running_vms)
+    if not still_running:
+        console.print("  → 停止完了")
+        return
+
+    console.print(
+        f"\n[yellow]⚠ {len(still_running)}台の停止をタイムアウトまでに確認できませんでした:[/yellow]"
+    )
+    for v in still_running:
+        console.print(f"  {v.name} [dim]({v.uuid})[/dim]")
+    if not questionary.confirm(
+        "このまま続行しますか？（稼働中のVMは操作に失敗する可能性があります）",
+        default=False,
+    ).unsafe_ask():
+        raise typer.Abort()
 
 
 def _check_reconfigure_homogeneity(vms: list) -> None:
@@ -737,8 +767,7 @@ def reconfigure(
         _parallel_vm_action(
             running_vms, lambda v: vm_action_path(v.uuid, "shutdown"), "シャットダウン中"
         )
-        _wait_for_poweroff(running_vms)
-        console.print("  → 停止完了")
+        _ensure_stopped(running_vms)
 
     # 新しい構成を入力
     console.print("\n[bold]新しい構成（Enterで変更なし）:[/bold]")
@@ -870,8 +899,7 @@ def destroy(
     if running_vms:
         _parallel_vm_action(running_vms, lambda v: vm_action_path(v.uuid, "power_off"), "停止中")
         console.print(f"  {len(running_vms)}台の停止リクエスト送信完了")
-        _wait_for_poweroff(running_vms)
-        console.print("  → 停止完了")
+        _ensure_stopped(running_vms)
         console.print("")
 
     # 並列削除
