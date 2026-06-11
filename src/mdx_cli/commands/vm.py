@@ -25,7 +25,7 @@ from mdx_cli.api.endpoints.vms import (
 )
 from mdx_cli.api.parallel import parallel_post, parallel_wait
 from mdx_cli.api.spinner import stop_active_spinner
-from mdx_cli.commands._common import get_client, ask_or_abort, resolve_project_id
+from mdx_cli.commands._common import get_client, resolve_project_id
 from mdx_cli.credentials.store import CredentialStore
 from mdx_cli.commands._name_pattern import (
     expand_name_pattern,
