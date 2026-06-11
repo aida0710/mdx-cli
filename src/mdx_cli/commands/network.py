@@ -22,7 +22,7 @@ from mdx_cli.commands._common import (
     resolve_project_id,
     resolve_segment_id,
 )
-from mdx_cli.console import console
+from mdx_cli.console import console, err_console
 from mdx_cli.models.network import ACL
 from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import SEGMENT_COLUMNS, SEGMENT_SUMMARY_COLUMNS
@@ -223,39 +223,43 @@ def check_ip(
                 usage = dnat_map[ip]
             result.append({"ip": ip, "status": status, "usage": usage})
         print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        console.print(f"\n[bold]グローバルIPv4 使用状況:[/bold]\n")
+        for ip in all_ips:
+            if ip in vm_map:
+                console.print(f"  {ip}  [cyan]{vm_map[ip]}[/cyan]")
+            elif ip in dnat_map:
+                console.print(f"  {ip}  [yellow]{dnat_map[ip]}[/yellow]")
+            else:
+                console.print(f"  {ip}  [green]未使用[/green]")
+
+        used_count = sum(1 for ip in all_ips if ip in vm_map or ip in dnat_map)
+        free_count = sum(1 for ip in all_ips if ip not in vm_map and ip not in dnat_map)
+        console.print(f"\n  合計: {len(all_ips)}  使用中: {used_count}  未使用: {free_count}")
+        console.print()
+
+    if not hole_dnats:
         return
 
-    console.print(f"\n[bold]グローバルIPv4 使用状況:[/bold]\n")
-    for ip in all_ips:
-        if ip in vm_map:
-            console.print(f"  {ip}  [cyan]{vm_map[ip]}[/cyan]")
-        elif ip in dnat_map:
-            console.print(f"  {ip}  [yellow]{dnat_map[ip]}[/yellow]")
-        else:
-            console.print(f"  {ip}  [green]未使用[/green]")
-
-    used_count = sum(1 for ip in all_ips if ip in vm_map or ip in dnat_map)
-    free_count = sum(1 for ip in all_ips if ip not in vm_map and ip not in dnat_map)
-    console.print(f"\n  合計: {len(all_ips)}  使用中: {used_count}  未使用: {free_count}")
-    console.print()
-
-    if not json_mode and hole_dnats:
+    # 穴の削除。--json 時のメッセージは stderr に出し、stdout のJSONを汚さない
+    out = err_console if json_mode else console
+    if not json_mode:
         console.print(f"\n[bold red]死んだVM宛のDNAT {len(hole_dnats)}件（穴）:[/bold red]")
         for d in hole_dnats:
             console.print(f"  {d.pool_address} → {d.dst_address} [dim]({d.uuid})[/dim]")
-        if vm_maps.partial_failure:
-            console.print("[yellow]⚠ VM詳細の取得に一部失敗しています。誤削除防止のため削除をスキップしました。再実行してください[/yellow]")
-        elif fix or questionary.confirm(f"{len(hole_dnats)}件を削除しますか？").unsafe_ask():
-            deleted, failed = 0, 0
-            for d in hole_dnats:
-                try:
-                    delete_dnat(client, d.uuid)
-                    deleted += 1
-                except Exception as e:
-                    console.print(f"[red]  削除失敗 {d.uuid}: {e}[/red]")
-                    failed += 1
-            stop_active_spinner()
-            console.print(f"\n削除: {deleted}件  失敗: {failed}件")
+    if vm_maps.partial_failure:
+        out.print("[yellow]⚠ VM詳細の取得に一部失敗しています。誤削除防止のため削除をスキップしました。再実行してください[/yellow]")
+    elif fix or (not json_mode and questionary.confirm(f"{len(hole_dnats)}件を削除しますか？").unsafe_ask()):
+        deleted, failed = 0, 0
+        for d in hole_dnats:
+            try:
+                delete_dnat(client, d.uuid)
+                deleted += 1
+            except Exception as e:
+                out.print(f"[red]  削除失敗 {d.uuid}: {e}[/red]")
+                failed += 1
+        stop_active_spinner()
+        out.print(f"\n削除: {deleted}件  失敗: {failed}件")
 
 
 @app.command("check-acl")
@@ -295,10 +299,10 @@ def check_acl(
             seg_results.append((seg, classified))
 
     if json_mode:
-        out = []
+        entries = []
         for seg, classified in seg_results:
             for acl, status, vm_name in classified:
-                out.append({
+                entries.append({
                     "segment_id": seg.uuid,
                     "segment_name": seg.name,
                     "acl_id": acl.uuid,
@@ -308,43 +312,46 @@ def check_acl(
                     "status": status,
                     "vm_name": vm_name,
                 })
-        print(json.dumps(out, indent=2, ensure_ascii=False))
+        print(json.dumps(entries, indent=2, ensure_ascii=False))
+    else:
+        console.print(f"\n[bold]ACL チェック（{_INTERNAL_IP_PREFIX}* 宛）:[/bold]")
+        total_holes = 0
+        for seg, classified in seg_results:
+            console.print(f"\n[bold]セグメント: {seg.name}[/bold] [dim]({seg.uuid})[/dim]")
+            for acl, status, vm_name in classified:
+                line = (
+                    f"{acl.protocol}  "
+                    f"{acl.src_address}/{acl.src_mask} :{acl.src_port}  →  "
+                    f"{acl.dst_address}/{acl.dst_mask} :{acl.dst_port}"
+                )
+                if status == "hole":
+                    console.print(f"  [red]⚠ 穴 [/red] {line}  [red](VM不在)[/red]")
+                elif status == "alive":
+                    console.print(f"    生存 {line}  [dim](VM: {vm_name})[/dim]")
+                else:
+                    console.print(f"  [dim]  範囲 {line}[/dim]")
+            h = sum(1 for _, s, _ in classified if s == "hole")
+            a = sum(1 for _, s, _ in classified if s == "alive")
+            r = sum(1 for _, s, _ in classified if s == "range")
+            total_holes += h
+            console.print(f"  [dim]合計: {len(classified)}  穴: {h}  生存: {a}  範囲: {r}[/dim]")
+        console.print(f"\n  穴の総数: [bold red]{total_holes}[/bold red]\n")
+
+    if not holes:
         return
 
-    console.print(f"\n[bold]ACL チェック（{_INTERNAL_IP_PREFIX}* 宛）:[/bold]")
-    total_holes = 0
-    for seg, classified in seg_results:
-        console.print(f"\n[bold]セグメント: {seg.name}[/bold] [dim]({seg.uuid})[/dim]")
-        for acl, status, vm_name in classified:
-            line = (
-                f"{acl.protocol}  "
-                f"{acl.src_address}/{acl.src_mask} :{acl.src_port}  →  "
-                f"{acl.dst_address}/{acl.dst_mask} :{acl.dst_port}"
-            )
-            if status == "hole":
-                console.print(f"  [red]⚠ 穴 [/red] {line}  [red](VM不在)[/red]")
-            elif status == "alive":
-                console.print(f"    生存 {line}  [dim](VM: {vm_name})[/dim]")
-            else:
-                console.print(f"  [dim]  範囲 {line}[/dim]")
-        h = sum(1 for _, s, _ in classified if s == "hole")
-        a = sum(1 for _, s, _ in classified if s == "alive")
-        r = sum(1 for _, s, _ in classified if s == "range")
-        total_holes += h
-        console.print(f"  [dim]合計: {len(classified)}  穴: {h}  生存: {a}  範囲: {r}[/dim]")
-    console.print(f"\n  穴の総数: [bold red]{total_holes}[/bold red]\n")
-
-    if not json_mode and holes:
-        if vm_maps.partial_failure:
-            console.print("[yellow]⚠ VM詳細の取得に一部失敗しています。誤削除防止のため削除をスキップしました。再実行してください[/yellow]")
-        elif fix or questionary.confirm(f"{len(holes)}件の穴ACLを削除しますか？").unsafe_ask():
-            deleted, failed = 0, 0
-            for seg, acl in holes:
-                try:
-                    delete_acl(client, acl.uuid)
-                    deleted += 1
-                except Exception as e:
-                    console.print(f"[red]  削除失敗 {acl.uuid}: {e}[/red]")
-                    failed += 1
-            stop_active_spinner()
-            console.print(f"\n削除: {deleted}件  失敗: {failed}件")
+    # 穴の削除。--json 時のメッセージは stderr に出し、stdout のJSONを汚さない
+    out = err_console if json_mode else console
+    if vm_maps.partial_failure:
+        out.print("[yellow]⚠ VM詳細の取得に一部失敗しています。誤削除防止のため削除をスキップしました。再実行してください[/yellow]")
+    elif fix or (not json_mode and questionary.confirm(f"{len(holes)}件の穴ACLを削除しますか？").unsafe_ask()):
+        deleted, failed = 0, 0
+        for seg, acl in holes:
+            try:
+                delete_acl(client, acl.uuid)
+                deleted += 1
+            except Exception as e:
+                out.print(f"[red]  削除失敗 {acl.uuid}: {e}[/red]")
+                failed += 1
+        stop_active_spinner()
+        out.print(f"\n削除: {deleted}件  失敗: {failed}件")
