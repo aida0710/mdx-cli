@@ -4,6 +4,15 @@ from mdx_cli.api.pagination import fetch_all
 from mdx_cli.models.vm import VM, VMDeployRequest, VMDeployResponse
 
 
+def vm_action_path(vm_id: str, action: str) -> str:
+    """VM操作API（power_on / shutdown / destroy 等）のパスを構築する。
+
+    並列実行（parallel_post）にパスを渡すコマンド層もここを使い、
+    パス定義をこのモジュールに一元化する。
+    """
+    return f"/api/vm/{vm_id}/{action}/"
+
+
 def list_vms(client: httpx.Client, project_id: str) -> list[VM]:
     items = fetch_all(client, f"/api/vm/project/{project_id}/")
     return [VM.model_validate(item) for item in items]
@@ -29,18 +38,18 @@ def deploy_vm(client: httpx.Client, request: VMDeployRequest) -> VMDeployRespons
 
 def power_on_vm(client: httpx.Client, vm_id: str, service_level: str = "spot") -> None:
     resp = client.post(
-        f"/api/vm/{vm_id}/power_on/", json={"service_level": service_level}
+        vm_action_path(vm_id, "power_on"), json={"service_level": service_level}
     )
     resp.raise_for_status()
 
 
 def power_off_vm(client: httpx.Client, vm_id: str) -> None:
-    resp = client.post(f"/api/vm/{vm_id}/power_off/")
+    resp = client.post(vm_action_path(vm_id, "power_off"))
     resp.raise_for_status()
 
 
 def destroy_vm(client: httpx.Client, vm_id: str) -> VMDeployResponse:
-    resp = client.post(f"/api/vm/{vm_id}/destroy/")
+    resp = client.post(vm_action_path(vm_id, "destroy"))
     resp.raise_for_status()
     data = resp.json()
     # task_id が文字列の場合はリストに変換
@@ -57,17 +66,17 @@ def get_vm_csv(client: httpx.Client, vm_id: str) -> dict:
 
 
 def shutdown_vm(client: httpx.Client, vm_id: str) -> None:
-    resp = client.post(f"/api/vm/{vm_id}/shutdown/")
+    resp = client.post(vm_action_path(vm_id, "shutdown"))
     resp.raise_for_status()
 
 
 def reboot_vm(client: httpx.Client, vm_id: str) -> None:
-    resp = client.post(f"/api/vm/{vm_id}/reboot/")
+    resp = client.post(vm_action_path(vm_id, "reboot"))
     resp.raise_for_status()
 
 
 def reset_vm(client: httpx.Client, vm_id: str) -> None:
-    resp = client.post(f"/api/vm/{vm_id}/reset/")
+    resp = client.post(vm_action_path(vm_id, "reset"))
     resp.raise_for_status()
 
 
@@ -80,7 +89,7 @@ def reconfigure_vm(client: httpx.Client, vm_id: str, config: dict) -> str:
         "pack_num": 5,
     }
     """
-    resp = client.post(f"/api/vm/{vm_id}/reconfigure/", json=config)
+    resp = client.post(vm_action_path(vm_id, "reconfigure"), json=config)
     resp.raise_for_status()
     data = resp.json()
     task_id = data.get("task_id", "")
