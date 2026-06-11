@@ -59,7 +59,7 @@ def test_collect_vm_ip_maps_builds_maps():
     }
     with patch("mdx_cli.commands.network.list_vms", return_value=vms), \
          patch("mdx_cli.commands.network.parallel_get", return_value=[detail]), \
-         patch("mdx_cli.commands.network.CredentialStore"):
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")):
         maps = _collect_vm_ip_maps(None, "proj-1", json_mode=True)
     assert maps.private_ip_to_vm == {"10.15.0.5": "web-1"}
     assert maps.global_ip_to_vm == {"203.0.113.10": "VM: web-1"}
@@ -70,7 +70,7 @@ def test_collect_vm_ip_maps_detects_partial_failure():
     vms = [VM(uuid="vm-1", name="web-1", status="PowerON")]
     with patch("mdx_cli.commands.network.list_vms", return_value=vms), \
          patch("mdx_cli.commands.network.parallel_get", return_value=[RuntimeError("boom")]), \
-         patch("mdx_cli.commands.network.CredentialStore"):
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")):
         maps = _collect_vm_ip_maps(None, "proj-1", json_mode=True)
     assert maps.partial_failure is True
     assert maps.private_ip_to_vm == {}
@@ -81,7 +81,7 @@ def test_collect_vm_ip_maps_uses_conservative_concurrency():
     vms = [VM(uuid="vm-1", name="web-1", status="PowerON")]
     with patch("mdx_cli.commands.network.list_vms", return_value=vms), \
          patch("mdx_cli.commands.network.parallel_get", return_value=[{}]) as mock_pg, \
-         patch("mdx_cli.commands.network.CredentialStore"):
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")):
         _collect_vm_ip_maps(None, "proj-1", json_mode=True)
     mc = mock_pg.call_args.kwargs.get("max_concurrent")
     assert mc is not None and mc <= 10, f"max_concurrent={mc} は過大（VM詳細APIが詰まる）"
@@ -100,7 +100,7 @@ def test_check_ip_table_output():
              {"service_networks": [{"global_ip": "203.0.113.11", "ipv4_address": ["10.15.0.5"]}]}
          ]), \
          patch("mdx_cli.commands.network.get_client"), \
-         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
          patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"):
         result = runner.invoke(app, ["check-ip", "--project-id", "proj-1"])
     assert result.exit_code == 0, result.output
@@ -126,7 +126,7 @@ def test_check_ip_fix_deletes_orphan_dnat():
          ]), \
          patch("mdx_cli.commands.network.delete_dnat") as mock_delete, \
          patch("mdx_cli.commands.network.get_client"), \
-         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
          patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
          patch("mdx_cli.commands.network.questionary") as mock_q:
         mock_q.confirm.return_value.unsafe_ask.return_value = True
@@ -149,7 +149,7 @@ def test_check_ip_fix_suppressed_on_partial_failure():
          patch("mdx_cli.commands.network.parallel_get", return_value=[RuntimeError("boom")]), \
          patch("mdx_cli.commands.network.delete_dnat") as mock_delete, \
          patch("mdx_cli.commands.network.get_client"), \
-         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
          patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
          patch("mdx_cli.commands.network.questionary") as mock_q:
         mock_q.confirm.return_value.unsafe_ask.return_value = True
@@ -168,7 +168,7 @@ def test_check_ip_deletes_dnat_on_confirm():
          patch("mdx_cli.commands.network.parallel_get", return_value=[]), \
          patch("mdx_cli.commands.network.delete_dnat") as mock_delete, \
          patch("mdx_cli.commands.network.get_client"), \
-         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
          patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
          patch("mdx_cli.commands.network.questionary") as mock_q:
         mock_q.confirm.return_value.unsafe_ask.return_value = True
@@ -187,7 +187,7 @@ def test_check_ip_keeps_dnat_on_decline():
          patch("mdx_cli.commands.network.parallel_get", return_value=[]), \
          patch("mdx_cli.commands.network.delete_dnat") as mock_delete, \
          patch("mdx_cli.commands.network.get_client"), \
-         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
          patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
          patch("mdx_cli.commands.network.questionary") as mock_q:
         mock_q.confirm.return_value.unsafe_ask.return_value = False
@@ -220,7 +220,7 @@ def test_collect_segment_acls_parallel():
         {"results": []},
     ]
     with patch("mdx_cli.commands.network.parallel_get", return_value=raw), \
-         patch("mdx_cli.commands.network.CredentialStore"):
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")):
         acl_lists = _collect_segment_acls(None, segments, json_mode=True)
     assert len(acl_lists) == 2
     assert len(acl_lists[0]) == 1
@@ -246,7 +246,7 @@ def test_check_acl_classifies_holes_alive_range():
              {"service_networks": [{"global_ip": "", "ipv4_address": ["10.15.0.5"]}]}
          ]), \
          patch("mdx_cli.commands.network.get_client"), \
-         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
          patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
          patch("mdx_cli.commands.network.questionary") as mock_q:
         mock_q.confirm.return_value.unsafe_ask.return_value = False
@@ -272,7 +272,7 @@ def test_check_acl_excludes_non_internal_dst():
          patch("mdx_cli.commands.network.list_vms", return_value=[]), \
          patch("mdx_cli.commands.network.parallel_get", return_value=[]), \
          patch("mdx_cli.commands.network.get_client"), \
-         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
          patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"):
         result = runner.invoke(app, ["check-acl", "--project-id", "proj-1"])
     assert result.exit_code == 0, result.output
@@ -289,7 +289,7 @@ def test_check_acl_json():
          patch("mdx_cli.commands.network.list_vms", return_value=[]), \
          patch("mdx_cli.commands.network.parallel_get", return_value=[]), \
          patch("mdx_cli.commands.network.get_client"), \
-         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
          patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"):
         result = runner.invoke(app, ["check-acl", "--project-id", "proj-1", "--json"])
     assert result.exit_code == 0, result.output
@@ -317,7 +317,7 @@ def test_check_acl_fix_deletes_holes():
          ]), \
          patch("mdx_cli.commands.network.delete_acl") as mock_delete, \
          patch("mdx_cli.commands.network.get_client"), \
-         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
          patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
          patch("mdx_cli.commands.network.questionary") as mock_q:
         mock_q.confirm.return_value.unsafe_ask.return_value = True
@@ -340,7 +340,7 @@ def test_check_acl_fix_suppressed_on_partial_failure():
          patch("mdx_cli.commands.network.parallel_get", return_value=[RuntimeError("boom")]), \
          patch("mdx_cli.commands.network.delete_acl") as mock_delete, \
          patch("mdx_cli.commands.network.get_client"), \
-         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
          patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
          patch("mdx_cli.commands.network.questionary") as mock_q:
         mock_q.confirm.return_value.unsafe_ask.return_value = True
@@ -361,7 +361,7 @@ def test_check_acl_deletes_on_confirm():
          patch("mdx_cli.commands.network.parallel_get", return_value=[]), \
          patch("mdx_cli.commands.network.delete_acl") as mock_delete, \
          patch("mdx_cli.commands.network.get_client"), \
-         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
          patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
          patch("mdx_cli.commands.network.questionary") as mock_q:
         mock_q.confirm.return_value.unsafe_ask.return_value = True
@@ -382,7 +382,7 @@ def test_check_acl_keeps_on_decline():
          patch("mdx_cli.commands.network.parallel_get", return_value=[]), \
          patch("mdx_cli.commands.network.delete_acl") as mock_delete, \
          patch("mdx_cli.commands.network.get_client"), \
-         patch("mdx_cli.commands.network.CredentialStore"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
          patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"), \
          patch("mdx_cli.commands.network.questionary") as mock_q:
         mock_q.confirm.return_value.unsafe_ask.return_value = False
@@ -390,3 +390,54 @@ def test_check_acl_keeps_on_decline():
     assert result.exit_code == 0, result.output
     mock_delete.assert_not_called()
     mock_q.confirm.assert_called_once()
+
+def test_check_ip_json_fix_deletes_and_keeps_stdout_json():
+    """--json --fix でも削除が実行され、stdout は有効なJSONのまま"""
+    dnats = [
+        DNAT(uuid="d-hole", pool_address="203.0.113.20", segment="s", dst_address="10.15.0.99"),
+    ]
+    with patch("mdx_cli.commands.network.list_assignable_ips", return_value=[]), \
+         patch("mdx_cli.commands.network.list_dnats", return_value=dnats), \
+         patch("mdx_cli.commands.network.list_vms", return_value=[
+             VM(uuid="vm-1", name="web-1", status="PowerON")
+         ]), \
+         patch("mdx_cli.commands.network.parallel_get", return_value=[
+             {"service_networks": [{"global_ip": "", "ipv4_address": ["10.15.0.5"]}]}
+         ]), \
+         patch("mdx_cli.commands.network.delete_dnat") as mock_delete, \
+         patch("mdx_cli.commands.network.get_client"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
+         patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"):
+        result = runner.invoke(app, ["check-ip", "--project-id", "proj-1", "--json", "--fix"])
+    assert result.exit_code == 0, result.output
+    mock_delete.assert_called_once()
+    assert mock_delete.call_args[0][1] == "d-hole"
+    # stdout は有効なJSON（削除メッセージは stderr に出る）
+    json.loads(result.stdout)
+
+
+def test_check_acl_json_fix_deletes_holes():
+    """--json --fix でも穴ACLの削除が実行され、stdout は有効なJSONのまま"""
+    seg = Segment(uuid="seg-1", name="seg1")
+    acls = [
+        ACL(uuid="a-hole", protocol="TCP", src_address="0.0.0.0", src_mask="0",
+            src_port="Any", dst_address="10.15.0.99", dst_mask="255.255.255.255",
+            dst_port="22"),
+    ]
+    with patch("mdx_cli.commands.network.list_segments", return_value=[seg]), \
+         patch("mdx_cli.commands.network._collect_segment_acls", return_value=[acls]), \
+         patch("mdx_cli.commands.network.list_vms", return_value=[
+             VM(uuid="vm-1", name="web-1", status="PowerON")
+         ]), \
+         patch("mdx_cli.commands.network.parallel_get", return_value=[
+             {"service_networks": [{"global_ip": "", "ipv4_address": ["10.15.0.5"]}]}
+         ]), \
+         patch("mdx_cli.commands.network.delete_acl") as mock_delete, \
+         patch("mdx_cli.commands.network.get_client"), \
+         patch("mdx_cli.commands.network.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")), \
+         patch("mdx_cli.commands.network.resolve_project_id", return_value="proj-1"):
+        result = runner.invoke(app, ["check-acl", "--project-id", "proj-1", "--json", "--fix"])
+    assert result.exit_code == 0, result.output
+    mock_delete.assert_called_once()
+    assert mock_delete.call_args[0][1] == "a-hole"
+    json.loads(result.stdout)

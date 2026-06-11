@@ -43,3 +43,12 @@ def test_load_credentials_when_none_saved(tmp_path, mocker):
     store = CredentialStore(config_dir=tmp_path)
     result = store.load_credentials()
     assert result is None
+
+def test_get_store_returns_same_instance(monkeypatch, tmp_path):
+    """get_store() はキャッシュされた同一インスタンスを返す"""
+    from mdx_cli.credentials.store import get_store
+
+    monkeypatch.setenv("MDX_CONFIG_DIR", str(tmp_path))
+    get_store.cache_clear()
+    assert get_store() is get_store()
+    assert get_store()._config_dir == tmp_path
