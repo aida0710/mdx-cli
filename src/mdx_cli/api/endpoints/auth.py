@@ -71,109 +71,110 @@ def sso_login(
         transport=httpx.HTTPTransport(local_address="0.0.0.0"),
     )
 
-    # Step 1: Shibboleth SP → IdPログインフォームへ
-    url = f"{base_url}/Shibboleth.sso/Login?target={base_url}/api/sso_login"
-    logger.debug("SSO開始: GET %s", url)
+    with session:
+        # Step 1: Shibboleth SP → IdPログインフォームへ
+        url = f"{base_url}/Shibboleth.sso/Login?target={base_url}/api/sso_login"
+        logger.debug("SSO開始: GET %s", url)
 
-    try:
-        resp = session.get(url)
-    except httpx.ConnectError as e:
-        logger.error("IdPへの接続に失敗: %s（VPN接続を確認してください）", e)
-        return None
-
-    logger.debug("→ %d %s", resp.status_code, resp.url)
-
-    # フォームを順次処理（最大10ステップ）
-    for step in range(10):
-        # JWT抽出チェック（/api/sso_login/ のレスポンス）
-        if "token" in resp.text and ("localStorage" in resp.text or "sso_login" in str(resp.url)):
-            logger.debug("Step %d: HTMLからJWTを抽出試行", step)
-            logger.debug("Body先頭500文字: %s", resp.text[:500])
-            # const token = 'eyJ...'; や token = "eyJ..."; にマッチ
-            match = re.search(
-                r"""token\s*[=,:]\s*['"]([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)['"]""",
-                resp.text,
-            )
-            if match:
-                token = match.group(1)
-                logger.debug("JWT取得成功 (%d文字)", len(token))
-                return token
-            logger.debug("Step %d: 正規表現でJWTが見つかりません", step)
-
-        # フォーム解析
         try:
-            action, fields = _parse_form(resp.text)
-        except ValueError:
-            break
-
-        form_type = _detect_form_type(fields)
-        action = _resolve_url(action, str(resp.url))
-        logger.debug("Step %d: フォーム種別=%s fields=%s", step, form_type, list(fields.keys()))
-
-        if form_type == "ls_check":
-            # ローカルストレージチェック: そのまま送信
-            logger.debug("Step %d: LSチェック送信 → %s", step, action)
-            resp = session.post(action, data=fields)
-
-        elif form_type == "login":
-            # ログインフォーム: ユーザー名/パスワードを入力
-            fields["j_username"] = username
-            fields["j_password"] = password
-            logger.debug("Step %d: ログイン送信 → %s", step, action)
-            resp = session.post(action, data=fields)
-
-            # 同じフォームが再表示された場合は認証失敗
-            try:
-                _, new_fields = _parse_form(resp.text)
-                if _detect_form_type(new_fields) == "login":
-                    logger.error("ユーザー名またはパスワードが無効です")
-                    return None
-            except ValueError:
-                pass
-
-        elif form_type == "totp":
-            # TOTPフォーム: OTPを入力
-            fields["j_tokenNumber"] = otp
-            logger.debug("Step %d: TOTP送信 → %s", step, action)
-            resp = session.post(action, data=fields)
-
-            # 同じフォームが再表示された場合はTOTP失敗
-            try:
-                _, new_fields = _parse_form(resp.text)
-                if _detect_form_type(new_fields) == "totp":
-                    logger.error("TOTP認証に失敗しました（コードが無効または期限切れ）")
-                    return None
-            except ValueError:
-                pass
-
-        elif form_type == "consent":
-            # 属性同意: グローバル同意で自動承認
-            fields["_shib_idp_consentOptions"] = "_shib_idp_globalConsent"
-            logger.debug("Step %d: 属性同意送信 → %s", step, action)
-            resp = session.post(action, data=fields)
-
-        elif form_type == "saml":
-            # SAMLResponse: SPに送信
-            logger.debug("Step %d: SAMLResponse送信 → %s", step, action)
-            resp = session.post(action, data=fields)
-
-        else:
-            logger.error("Step %d: 不明なフォーム種別: fields=%s", step, list(fields.keys()))
-            logger.debug("Body: %s", resp.text[:500])
-            break
+            resp = session.get(url)
+        except httpx.ConnectError as e:
+            logger.error("IdPへの接続に失敗: %s（VPN接続を確認してください）", e)
+            return None
 
         logger.debug("→ %d %s", resp.status_code, resp.url)
 
-    # フォームループで取得できなかった場合、セッションCookieで /api/auth/ を試行
-    logger.debug("POST /api/auth/ をセッションCookieで試行")
-    resp = session.post(f"{base_url}/api/auth/")
-    logger.debug("→ %d %s", resp.status_code, resp.text[:200])
+        # フォームを順次処理（最大10ステップ）
+        for step in range(10):
+            # JWT抽出チェック（/api/sso_login/ のレスポンス）
+            if "token" in resp.text and ("localStorage" in resp.text or "sso_login" in str(resp.url)):
+                logger.debug("Step %d: HTMLからJWTを抽出試行", step)
+                logger.debug("Body先頭500文字: %s", resp.text[:500])
+                # const token = 'eyJ...'; や token = "eyJ..."; にマッチ
+                match = re.search(
+                    r"""token\s*[=,:]\s*['"]([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)['"]""",
+                    resp.text,
+                )
+                if match:
+                    token = match.group(1)
+                    logger.debug("JWT取得成功 (%d文字)", len(token))
+                    return token
+                logger.debug("Step %d: 正規表現でJWTが見つかりません", step)
 
-    if resp.status_code == 200:
-        token = resp.json().get("token")
-        if token:
-            logger.debug("JWT取得成功 (%d文字)", len(token))
-            return token
+            # フォーム解析
+            try:
+                action, fields = _parse_form(resp.text)
+            except ValueError:
+                break
 
-    logger.error("JWTトークンの取得に失敗しました")
-    return None
+            form_type = _detect_form_type(fields)
+            action = _resolve_url(action, str(resp.url))
+            logger.debug("Step %d: フォーム種別=%s fields=%s", step, form_type, list(fields.keys()))
+
+            if form_type == "ls_check":
+                # ローカルストレージチェック: そのまま送信
+                logger.debug("Step %d: LSチェック送信 → %s", step, action)
+                resp = session.post(action, data=fields)
+
+            elif form_type == "login":
+                # ログインフォーム: ユーザー名/パスワードを入力
+                fields["j_username"] = username
+                fields["j_password"] = password
+                logger.debug("Step %d: ログイン送信 → %s", step, action)
+                resp = session.post(action, data=fields)
+
+                # 同じフォームが再表示された場合は認証失敗
+                try:
+                    _, new_fields = _parse_form(resp.text)
+                    if _detect_form_type(new_fields) == "login":
+                        logger.error("ユーザー名またはパスワードが無効です")
+                        return None
+                except ValueError:
+                    pass
+
+            elif form_type == "totp":
+                # TOTPフォーム: OTPを入力
+                fields["j_tokenNumber"] = otp
+                logger.debug("Step %d: TOTP送信 → %s", step, action)
+                resp = session.post(action, data=fields)
+
+                # 同じフォームが再表示された場合はTOTP失敗
+                try:
+                    _, new_fields = _parse_form(resp.text)
+                    if _detect_form_type(new_fields) == "totp":
+                        logger.error("TOTP認証に失敗しました（コードが無効または期限切れ）")
+                        return None
+                except ValueError:
+                    pass
+
+            elif form_type == "consent":
+                # 属性同意: グローバル同意で自動承認
+                fields["_shib_idp_consentOptions"] = "_shib_idp_globalConsent"
+                logger.debug("Step %d: 属性同意送信 → %s", step, action)
+                resp = session.post(action, data=fields)
+
+            elif form_type == "saml":
+                # SAMLResponse: SPに送信
+                logger.debug("Step %d: SAMLResponse送信 → %s", step, action)
+                resp = session.post(action, data=fields)
+
+            else:
+                logger.error("Step %d: 不明なフォーム種別: fields=%s", step, list(fields.keys()))
+                logger.debug("Body: %s", resp.text[:500])
+                break
+
+            logger.debug("→ %d %s", resp.status_code, resp.url)
+
+        # フォームループで取得できなかった場合、セッションCookieで /api/auth/ を試行
+        logger.debug("POST /api/auth/ をセッションCookieで試行")
+        resp = session.post(f"{base_url}/api/auth/")
+        logger.debug("→ %d %s", resp.status_code, resp.text[:200])
+
+        if resp.status_code == 200:
+            token = resp.json().get("token")
+            if token:
+                logger.debug("JWT取得成功 (%d文字)", len(token))
+                return token
+
+        logger.error("JWTトークンの取得に失敗しました")
+        return None
