@@ -177,18 +177,20 @@ def test_vm_reconfigure_pattern_matches_multiple_vms():
                 ]) as mock_action:
                     with patch("mdx_cli.commands.vm.get_client"):
                         with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
-                            with patch("mdx_cli.commands.vm.questionary") as mock_q:
-                                mock_q.text.return_value.unsafe_ask.side_effect = ["8", "40"]
-                                mock_q.confirm.return_value.unsafe_ask.return_value = True
-                                result = runner.invoke(app, [
-                                    "reconfigure", "worker-*",
-                                    "-p", "proj-1", "--no-wait",
-                                ])
-                                assert result.exit_code == 0, result.output
-                                mock_action.assert_called_once()
-                                # action_name は "構成変更中"
-                                args = mock_action.call_args
-                                assert args[0][2] == "構成変更中"
+                            with patch("mdx_cli.commands._common.questionary") as mock_common_q:
+                                # パック数・ディスクGB は prompt_int（_common）経由
+                                mock_common_q.text.return_value.unsafe_ask.side_effect = ["8", "40"]
+                                with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                                    mock_q.confirm.return_value.unsafe_ask.return_value = True
+                                    result = runner.invoke(app, [
+                                        "reconfigure", "worker-*",
+                                        "-p", "proj-1", "--no-wait",
+                                    ])
+                                    assert result.exit_code == 0, result.output
+                                    mock_action.assert_called_once()
+                                    # action_name は "構成変更中"
+                                    args = mock_action.call_args
+                                    assert args[0][2] == "構成変更中"
 
 
 def test_vm_destroy_single():
@@ -581,3 +583,22 @@ def test_ensure_stopped_no_timeout_no_confirm():
         with patch("mdx_cli.commands.vm.questionary") as mock_q:
             _ensure_stopped([vm])
             mock_q.confirm.assert_not_called()
+
+
+def test_vm_deploy_pack_num_out_of_range_fails(tmp_path):
+    """--pack-num が上限（cpu=152）を超えたらエラー終了。"""
+    key_file = tmp_path / "id.pub"
+    key_file.write_text("ssh-rsa AAAA...")
+
+    with patch("mdx_cli.commands.vm.list_templates", return_value=[_make_template()]):
+        with patch("mdx_cli.commands.vm.list_segments", return_value=[_make_segment()]):
+            with patch("mdx_cli.commands.vm.get_client"):
+                with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                    result = runner.invoke(app, [
+                        "deploy", "-t", "Ubuntu", "-n", "test-vm",
+                        "--pack-type", "cpu", "--pack-num", "200",
+                        "--disk", "40", "--service-level", "spot",
+                        "-k", str(key_file), "-y", "--no-wait",
+                    ])
+                    assert result.exit_code == 1
+                    assert "1〜152" in result.output

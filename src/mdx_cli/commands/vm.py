@@ -22,6 +22,7 @@ from mdx_cli.commands._common import (
     get_auth_context,
     get_client,
     is_uuid,
+    prompt_int,
     refresh_token_proactive,
     resolve_project_id,
     select_from_list,
@@ -199,18 +200,22 @@ def deploy(
     spec = PACK_SPECS[pack_type]
 
     if pack_num_opt is not None:
+        if not 1 <= pack_num_opt <= spec.max_num:
+            fail(f"パック数は 1〜{spec.max_num} の範囲で指定してください")
         pack_num = pack_num_opt
     else:
-        pack_num = int(questionary.text(
-            f"パック数 (最大{spec.max_num}):", default=str(spec.default_num)
-        ).unsafe_ask())
+        pack_num = prompt_int(
+            f"パック数 (最大{spec.max_num}):",
+            max_val=spec.max_num,
+            default=str(spec.default_num),
+        )
 
     if disk is not None:
         disk_size = disk
     else:
-        disk_size = int(questionary.text(
+        disk_size = prompt_int(
             "ディスクサイズ(GB):", default=str(selected_tmpl.lower_limit_disk)
-        ).unsafe_ask())
+        )
 
     service_level = _resolve_service_level(service_level_opt)
 
@@ -776,10 +781,11 @@ def reconfigure(
     current_pack_num = ref.pack_num if ref.pack_num is not None else 3
     spec = PACK_SPECS.get(pack_type, PACK_SPECS["cpu"])
 
-    new_pack_num = int(questionary.text(
+    new_pack_num = prompt_int(
         f"パック数 ({pack_type}, 最大{spec.max_num}):",
+        max_val=spec.max_num,
         default=str(current_pack_num),
-    ).unsafe_ask())
+    )
 
     console.print(f"  → [cyan]{spec.resource_summary(new_pack_num)}[/cyan]")
 
@@ -791,10 +797,10 @@ def reconfigure(
             current_cap_int = int(float(current_cap))
         except (ValueError, TypeError):
             current_cap_int = 40
-        new_cap = int(questionary.text(
+        new_cap = prompt_int(
             f"ディスク #{d.get('disk_number', '?')} (GB):",
             default=str(current_cap_int),
-        ).unsafe_ask())
+        )
         new_capacities.append(new_cap)
 
     # 確認
