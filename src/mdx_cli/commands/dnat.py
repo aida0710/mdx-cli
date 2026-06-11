@@ -64,7 +64,7 @@ def dnat_add(
     # 宛先アドレス
     dst_address = questionary.text("宛先アドレス（プライベートIP）:").unsafe_ask()
 
-    console.print(f"\n[bold]確認:[/bold]")
+    console.print("\n[bold]確認:[/bold]")
     console.print(f"  グローバルIP: {pool_address}")
     console.print(f"  宛先:         {dst_address}")
 
@@ -115,7 +115,7 @@ def dnat_edit(
     if selected.pool_address not in ips:
         ips.insert(0, selected.pool_address)
 
-    console.print(f"\n[bold]現在の値（Enterでそのまま）:[/bold]")
+    console.print("\n[bold]現在の値（Enterでそのまま）:[/bold]")
     pool_address = select_from_list(
         ips,
         lambda ip: f"{ip} [cyan](現在)[/cyan]" if ip == selected.pool_address else ip,
@@ -129,7 +129,7 @@ def dnat_edit(
     # 宛先アドレス
     dst_address = questionary.text("宛先アドレス:", default=selected.dst_address).unsafe_ask()
 
-    console.print(f"\n[bold]変更後:[/bold]")
+    console.print("\n[bold]変更後:[/bold]")
     console.print(f"  グローバルIP: {pool_address}")
     console.print(f"  宛先:         {dst_address}")
 

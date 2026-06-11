@@ -107,6 +107,9 @@ async def _post_one(
                     return resp.json()
                 except Exception:
                     return {}
+            # TimeoutException は意図的にリトライしない: タイムアウトした
+            # POSTはサーバー側で処理済みの可能性があり、再送すると
+            # 電源操作・デプロイ等が二重実行されるリスクがあるため。
             except (httpx.HTTPStatusError, httpx.ConnectError) as e:
                 if attempt < MAX_RETRIES - 1:
                     wait = RETRY_BACKOFF[attempt]

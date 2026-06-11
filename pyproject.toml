@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-mdx = "mdx_cli.main:app"
+mdx = "mdx_cli.main:cli"
 
 [build-system]
 requires = ["hatchling"]
@@ -33,4 +33,13 @@ dev = [
     "pytest-mock>=3.14",
     "respx>=0.22",
     "pyinstaller>=6.0",
+    "ruff>=0.15.16",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+# E4xx: import配置 / E7xx: 文の誤り / E9xx: 構文エラー / F: 未使用import・未定義名 等
+select = ["E4", "E7", "E9", "F"]
