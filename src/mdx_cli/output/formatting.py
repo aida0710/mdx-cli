@@ -1,12 +1,10 @@
 import json
 
 from pydantic import BaseModel
-from rich.console import Console
 from rich.table import Table
 
 from mdx_cli.api.spinner import stop_active_spinner
-
-console = Console()
+from mdx_cli.console import console
 
 
 def render_json(data: BaseModel | list[BaseModel]) -> None:

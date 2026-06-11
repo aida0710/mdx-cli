@@ -9,7 +9,7 @@ import logging
 from typing import Callable
 
 import httpx
-from mdx_cli.settings import Settings
+from mdx_cli.settings import get_settings
 
 logger = logging.getLogger("mdx_cli")
 
@@ -72,7 +72,7 @@ def parallel_get(
     return_exceptions=True にすると、失敗したリクエストはExceptionオブジェクトとして
     結果に含まれ、全体は止まらない（caller側で例外処理する）。
     """
-    settings = Settings()
+    settings = get_settings()
 
     async def _run():
         semaphore = asyncio.Semaphore(max_concurrent)
@@ -127,7 +127,7 @@ def parallel_post(
 
     失敗したリクエストはExceptionオブジェクトとして返る（全体は止まらない）。
     """
-    settings = Settings()
+    settings = get_settings()
 
     async def _run():
         semaphore = asyncio.Semaphore(max_concurrent)
@@ -206,7 +206,7 @@ def parallel_wait(
     on_done: Callable[[str, dict], None] | None = None,
 ) -> list[dict]:
     """複数タスクを並列でポーリングし全完了まで待機する。"""
-    settings = Settings()
+    settings = get_settings()
 
     async def _run():
         semaphore = asyncio.Semaphore(max_concurrent)

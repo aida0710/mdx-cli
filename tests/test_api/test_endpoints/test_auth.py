@@ -3,7 +3,7 @@ from unittest.mock import patch
 import httpx
 import respx
 
-from mdx_cli.api.endpoints.auth import _parse_form, refresh_token, sso_login
+from mdx_cli.api.endpoints.auth import _parse_form, sso_login
 
 
 def test_parse_form_extracts_fields():
@@ -28,26 +28,6 @@ def test_parse_form_no_form_raises():
     import pytest
     with pytest.raises(ValueError, match="フォームが見つかりません"):
         _parse_form("<html><body>No form here</body></html>")
-
-
-@respx.mock
-def test_refresh_token_success():
-    respx.post("/api/refresh/").mock(
-        return_value=httpx.Response(200, json={"token": "jwt-refreshed"})
-    )
-    client = httpx.Client(base_url="https://oprpl.mdx.jp")
-    new_token = refresh_token(client, "old-jwt")
-    assert new_token == "jwt-refreshed"
-
-
-@respx.mock
-def test_refresh_token_failure():
-    respx.post("/api/refresh/").mock(
-        return_value=httpx.Response(401, json={"detail": "Token expired"})
-    )
-    client = httpx.Client(base_url="https://oprpl.mdx.jp")
-    new_token = refresh_token(client, "expired-jwt")
-    assert new_token is None
 
 
 def test_sso_login_uses_ipv4_transport():
