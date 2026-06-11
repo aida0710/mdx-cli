@@ -4,45 +4,40 @@ import httpx
 import questionary
 from questionary import Choice
 import typer
-from rich.console import Console
 
 from mdx_cli.api.endpoints.networks import list_segments
-from mdx_cli.api.endpoints.tasks import wait_for_task
 from mdx_cli.api.endpoints.templates import list_templates
 from mdx_cli.api.endpoints.vms import (
     deploy_vm,
-    destroy_vm,
     get_vm,
-    get_vm_csv,
     list_vms,
-    power_off_vm,
-    power_on_vm,
-    reboot_vm,
     reconfigure_vm,
-    reset_vm,
-    shutdown_vm,
     sync_vms,
+    vm_action_path,
 )
 from mdx_cli.api.parallel import parallel_post, parallel_wait
 from mdx_cli.api.spinner import progress_status, stop_active_spinner
 from mdx_cli.commands._common import (
+    fail,
     get_auth_context,
     get_client,
+    is_uuid,
     refresh_token_proactive,
     resolve_project_id,
+    select_from_list,
 )
 from mdx_cli.commands._name_pattern import (
     expand_name_pattern,
     expand_name_pattern_for_deploy,
     match_names,
 )
+from mdx_cli.console import console
 from mdx_cli.models.vm import VMDeployRequest
 from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import VM_COLUMNS
 from mdx_cli.settings import Settings
 
 app = typer.Typer(no_args_is_help=True, help="仮想マシン管理")
-console = Console()
 
 
 
@@ -68,7 +63,7 @@ def show(
     client = get_client(silent=json)
 
     # UUID指定
-    if target and len(target) == 36 and "-" in target:
+    if target and is_uuid(target):
         vm = get_vm(client, target)
     elif target:
         # 名前で検索
@@ -77,19 +72,19 @@ def show(
         stop_active_spinner()
         matched = [v for v in all_vms if v.name == target]
         if not matched:
-            console.print(f"[red]VM '{target}' が見つかりません[/red]")
-            raise typer.Exit(code=1)
+            fail(f"VM '{target}' が見つかりません")
         vm = get_vm(client, matched[0].uuid)
     else:
         # 一覧から選択
         pid = resolve_project_id(project_id)
         all_vms = list_vms(client, pid)
         stop_active_spinner()
-        console.print("\n[bold]VM一覧:[/bold]")
-        for i, v in enumerate(all_vms, 1):
-            console.print(f"  {i}) {v.name} [{v.status}]")
-        idx = int(questionary.text("\n番号を入力:").unsafe_ask()) - 1
-        vm = get_vm(client, all_vms[idx].uuid)
+        if not all_vms:
+            fail("VMがありません")
+        selected = select_from_list(
+            all_vms, lambda v: f"{v.name} [{v.status}]", title="VM一覧:"
+        )
+        vm = get_vm(client, selected.uuid)
 
     stop_active_spinner()
 
@@ -202,8 +197,7 @@ def deploy(
     if template:
         matched = [t for t in templates if template.lower() in t.name.lower()]
         if not matched:
-            console.print(f"[red]テンプレート '{template}' が見つかりません[/red]")
-            raise typer.Exit(code=1)
+            fail(f"テンプレート '{template}' が見つかりません")
         selected_tmpl = matched[0]
     else:
         console.print("\n[bold]テンプレート:[/bold]")
@@ -253,11 +247,9 @@ def deploy(
             answer = questionary.text("パス:").unsafe_ask()
             key_path = Path(answer).expanduser()
     if not key_path.is_absolute():
-        console.print("[red]絶対パスまたは ~/... で指定してください[/red]")
-        raise typer.Exit(code=1)
+        fail("絶対パスまたは ~/... で指定してください")
     if not key_path.exists():
-        console.print(f"[red]ファイルが見つかりません: {key_path}[/red]")
-        raise typer.Exit(code=1)
+        fail(f"ファイルが見つかりません: {key_path}")
     shared_key = key_path.read_text().strip()
 
     # --- VM名 ---
@@ -369,12 +361,7 @@ def deploy(
     console.print(f"\n{len(task_ids)}台のデプロイを開始しました")
 
     if not no_wait and task_ids:
-        task_results = _parallel_task_wait(task_ids)
-        for data in task_results:
-            obj_name = data.get("object_name", "?")
-            status = data.get("status", "?")
-            style = "[green]" if status == "Completed" else "[red]"
-            console.print(f"  {style}{obj_name}: {status}[/]")
+        _print_task_results(_parallel_task_wait(task_ids))
 
 
 def _resolve_vms(client, pattern: str, project_id: str | None) -> list:
@@ -382,8 +369,7 @@ def _resolve_vms(client, pattern: str, project_id: str | None) -> list:
 
     UUIDならそのまま、名前パターンならVM一覧から検索。
     """
-    # UUIDっぽければ直接返す
-    if len(pattern) == 36 and "-" in pattern:
+    if is_uuid(pattern):
         vm = get_vm(client, pattern)
         stop_active_spinner()
         return [vm]
@@ -396,8 +382,7 @@ def _resolve_vms(client, pattern: str, project_id: str | None) -> list:
     matched_names = match_names(pattern, all_names)
 
     if not matched_names:
-        console.print(f"[red]パターン '{pattern}' に一致するVMがありません[/red]")
-        raise typer.Exit(code=1)
+        fail(f"パターン '{pattern}' に一致するVMがありません")
 
     return [v for v in all_vms if v.name in set(matched_names)]
 
@@ -486,15 +471,9 @@ def _check_reconfigure_homogeneity(vms: list) -> None:
         disk_counts.add(len(extra.get("hard_disks", [])))
 
     if len(pack_types) > 1:
-        console.print(
-            f"[red]pack_type が混在しているため一括構成変更できません: {pack_types}[/red]"
-        )
-        raise typer.Exit(code=1)
+        fail(f"pack_type が混在しているため一括構成変更できません: {pack_types}")
     if len(disk_counts) > 1:
-        console.print(
-            f"[red]ディスク本数が混在しているため一括構成変更できません: {disk_counts}[/red]"
-        )
-        raise typer.Exit(code=1)
+        fail(f"ディスク本数が混在しているため一括構成変更できません: {disk_counts}")
 
 
 def _parallel_vm_action(vms: list, action_path_fn, action_name: str, json_fn=None) -> list[dict]:
@@ -521,6 +500,15 @@ def _parallel_vm_action(vms: list, action_path_fn, action_name: str, json_fn=Non
     return all_results
 
 
+def _print_task_results(task_results: list[dict]) -> None:
+    """タスク完了結果を Completed=緑 / それ以外=赤 で一覧表示する。"""
+    for data in task_results:
+        name = data.get("object_name", "?")
+        status = data.get("status", "?")
+        style = "[green]" if status == "Completed" else "[red]"
+        console.print(f"  {style}{name}: {status}[/]")
+
+
 def _parallel_task_wait(task_ids: list[str]) -> list[dict]:
     """複数タスクを並列ポーリングで待機する。"""
     token, base_url = get_auth_context()
@@ -541,124 +529,128 @@ def _parallel_task_wait(task_ids: list[str]) -> list[dict]:
     return results
 
 
+_TARGET_HELP = "VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"
+
+
+def _bulk_power_action(
+    target: str,
+    project_id: str | None,
+    *,
+    action: str,
+    header_verb: str,
+    progress_label: str,
+    final_verb: str,
+    note: str = "",
+    danger: bool = False,
+    body_fn=None,
+) -> None:
+    """電源系コマンド共通フロー: 対象解決 → 一覧表示 → 確認 → 並列実行。
+
+    danger=True は対象が1台でも default=False で確認する（reset 等）。
+    それ以外は複数台のときのみ確認する。
+    """
+    client = get_client()
+    vms = _resolve_vms(client, target, project_id)
+
+    style = "bold red" if danger else "bold"
+    console.print(f"\n[{style}]{len(vms)}台を{header_verb}します{note}:[/{style}]")
+    for v in vms:
+        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
+
+    if danger:
+        if not questionary.confirm(
+            f"\n本当に{len(vms)}台を{header_verb}しますか？", default=False
+        ).unsafe_ask():
+            raise typer.Abort()
+    elif len(vms) > 1:
+        if not questionary.confirm(f"\n{len(vms)}台を{header_verb}しますか？").unsafe_ask():
+            raise typer.Abort()
+
+    _parallel_vm_action(
+        vms, lambda v: vm_action_path(v.uuid, action), progress_label, json_fn=body_fn
+    )
+    for v in vms:
+        console.print(f"  [green]✓[/green] {v.name}")
+    console.print(f"\n{len(vms)}台の{final_verb}を実行しました")
+
+
 @app.command()
 def start(
-    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
+    target: str = typer.Argument(help=_TARGET_HELP),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
     service_level: str = typer.Option("spot", "--service-level", "-s", help="サービスレベル"),
 ) -> None:
     """VM起動（パターンで複数台対応）"""
-    client = get_client()
-    vms = _resolve_vms(client, target, project_id)
-
-    console.print(f"\n[bold]{len(vms)}台を起動します（{service_level}）:[/bold]")
-    for v in vms:
-        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
-
-    if len(vms) > 1:
-        if not questionary.confirm(f"\n{len(vms)}台を起動しますか？").unsafe_ask():
-            raise typer.Abort()
-
-    _parallel_vm_action(
-        vms,
-        lambda v: f"/api/vm/{v.uuid}/power_on/",
-        "起動中",
-        json_fn=lambda v: {"service_level": service_level},
+    _bulk_power_action(
+        target, project_id,
+        action="power_on",
+        header_verb="起動",
+        progress_label="起動中",
+        final_verb="起動",
+        note=f"（{service_level}）",
+        body_fn=lambda v: {"service_level": service_level},
     )
-    for v in vms:
-        console.print(f"  [green]✓[/green] {v.name}")
-    console.print(f"\n{len(vms)}台の起動を実行しました")
 
 
 @app.command()
 def stop(
-    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
+    target: str = typer.Argument(help=_TARGET_HELP),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
 ) -> None:
     """VM強制停止（パターンで複数台対応）。正常停止は shutdown を使用"""
-    client = get_client()
-    vms = _resolve_vms(client, target, project_id)
-
-    console.print(f"\n[bold]{len(vms)}台を停止します:[/bold]")
-    for v in vms:
-        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
-
-    if len(vms) > 1:
-        if not questionary.confirm(f"\n{len(vms)}台を停止しますか？").unsafe_ask():
-            raise typer.Abort()
-
-    _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/power_off/", "強制停止中")
-    for v in vms:
-        console.print(f"  [green]✓[/green] {v.name}")
-    console.print(f"\n{len(vms)}台の強制停止を実行しました")
+    _bulk_power_action(
+        target, project_id,
+        action="power_off",
+        header_verb="停止",
+        progress_label="強制停止中",
+        final_verb="強制停止",
+    )
 
 
 @app.command()
 def shutdown(
-    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
+    target: str = typer.Argument(help=_TARGET_HELP),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
 ) -> None:
     """VM正常シャットダウン（パターンで複数台対応）"""
-    client = get_client()
-    vms = _resolve_vms(client, target, project_id)
-
-    console.print(f"\n[bold]{len(vms)}台をシャットダウンします:[/bold]")
-    for v in vms:
-        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
-
-    if len(vms) > 1:
-        if not questionary.confirm(f"\n{len(vms)}台をシャットダウンしますか？").unsafe_ask():
-            raise typer.Abort()
-
-    _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/shutdown/", "シャットダウン中")
-    for v in vms:
-        console.print(f"  [green]✓[/green] {v.name}")
-    console.print(f"\n{len(vms)}台のシャットダウンを実行しました")
+    _bulk_power_action(
+        target, project_id,
+        action="shutdown",
+        header_verb="シャットダウン",
+        progress_label="シャットダウン中",
+        final_verb="シャットダウン",
+    )
 
 
 @app.command()
 def reboot(
-    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
+    target: str = typer.Argument(help=_TARGET_HELP),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
 ) -> None:
     """VM再起動（パターンで複数台対応）"""
-    client = get_client()
-    vms = _resolve_vms(client, target, project_id)
-
-    console.print(f"\n[bold]{len(vms)}台を再起動します:[/bold]")
-    for v in vms:
-        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
-
-    if len(vms) > 1:
-        if not questionary.confirm(f"\n{len(vms)}台を再起動しますか？").unsafe_ask():
-            raise typer.Abort()
-
-    _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/reboot/", "再起動中")
-    for v in vms:
-        console.print(f"  [green]✓[/green] {v.name}")
-    console.print(f"\n{len(vms)}台の再起動を実行しました")
+    _bulk_power_action(
+        target, project_id,
+        action="reboot",
+        header_verb="再起動",
+        progress_label="再起動中",
+        final_verb="再起動",
+    )
 
 
 @app.command()
 def reset(
-    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
+    target: str = typer.Argument(help=_TARGET_HELP),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
 ) -> None:
     """VMリセット（パターンで複数台対応）"""
-    client = get_client()
-    vms = _resolve_vms(client, target, project_id)
-
-    console.print(f"\n[bold red]{len(vms)}台をリセットします:[/bold red]")
-    for v in vms:
-        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
-
-    if not questionary.confirm(f"\n本当に{len(vms)}台をリセットしますか？", default=False).unsafe_ask():
-        raise typer.Abort()
-
-    _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/reset/", "リセット中")
-    for v in vms:
-        console.print(f"  [green]✓[/green] {v.name}")
-    console.print(f"\n{len(vms)}台のリセットを実行しました")
+    _bulk_power_action(
+        target, project_id,
+        action="reset",
+        header_verb="リセット",
+        progress_label="リセット中",
+        final_verb="リセット",
+        danger=True,
+    )
 
 
 @app.command()
@@ -675,11 +667,12 @@ def reconfigure(
     if not target:
         all_vms = list_vms(client, pid)
         stop_active_spinner()
-        console.print("\n[bold]VM一覧:[/bold]")
-        for i, v in enumerate(all_vms, 1):
-            console.print(f"  {i}) {v.name} [{v.status}]")
-        idx = int(questionary.text("\n番号を入力:").unsafe_ask()) - 1
-        vms_brief = [all_vms[idx]]
+        if not all_vms:
+            fail("VMがありません")
+        selected = select_from_list(
+            all_vms, lambda v: f"{v.name} [{v.status}]", title="VM一覧:"
+        )
+        vms_brief = [selected]
     else:
         vms_brief = _resolve_vms(client, target, project_id)
 
@@ -688,8 +681,7 @@ def reconfigure(
     stop_active_spinner()
 
     if not vms_detail:
-        console.print("[red]構成変更可能なVMがありません（詳細取得が全て失敗しました）[/red]")
-        raise typer.Exit(code=1)
+        fail("構成変更可能なVMがありません（詳細取得が全て失敗しました）")
 
     # 複数台なら均質性チェック
     if len(vms_detail) > 1:
@@ -724,7 +716,7 @@ def reconfigure(
         if not questionary.confirm("停止して構成変更しますか？").unsafe_ask():
             raise typer.Abort()
         _parallel_vm_action(
-            running_vms, lambda v: f"/api/vm/{v.uuid}/shutdown/", "シャットダウン中"
+            running_vms, lambda v: vm_action_path(v.uuid, "shutdown"), "シャットダウン中"
         )
         _wait_for_poweroff(running_vms)
         console.print(f"  → 停止完了")
@@ -823,7 +815,7 @@ def reconfigure(
     else:
         results = _parallel_vm_action(
             vms_detail,
-            lambda v: f"/api/vm/{v.uuid}/reconfigure/",
+            lambda v: vm_action_path(v.uuid, "reconfigure"),
             "構成変更中",
             json_fn=_build_config,
         )
@@ -841,12 +833,7 @@ def reconfigure(
         console.print(f"\n{len(task_ids)}台の構成変更を開始しました")
 
     if not no_wait and task_ids:
-        task_results = _parallel_task_wait(task_ids)
-        for data in task_results:
-            obj_name = data.get("object_name", "?")
-            status = data.get("status", "?")
-            style = "[green]" if status == "Completed" else "[red]"
-            console.print(f"  {style}{obj_name}: {status}[/]")
+        _print_task_results(_parallel_task_wait(task_ids))
 
 
 @app.command()
@@ -875,14 +862,14 @@ def destroy(
 
     # 稼働中VMを並列停止して完了を待つ
     if running_vms:
-        _parallel_vm_action(running_vms, lambda v: f"/api/vm/{v.uuid}/power_off/", "停止中")
+        _parallel_vm_action(running_vms, lambda v: vm_action_path(v.uuid, "power_off"), "停止中")
         console.print(f"  {len(running_vms)}台の停止リクエスト送信完了")
         _wait_for_poweroff(running_vms)
         console.print(f"  → 停止完了")
         console.print("")
 
     # 並列削除
-    destroy_results = _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/destroy/", "削除中")
+    destroy_results = _parallel_vm_action(vms, lambda v: vm_action_path(v.uuid, "destroy"), "削除中")
 
     task_ids: list[str] = []
     for v, resp_data in zip(vms, destroy_results):
@@ -895,12 +882,7 @@ def destroy(
     console.print(f"\n{len(task_ids)}台の削除を開始しました")
 
     if not no_wait:
-        task_results = _parallel_task_wait(task_ids)
-        for data in task_results:
-            name = data.get("object_name", "?")
-            status = data.get("status", "?")
-            style = "[green]" if status == "Completed" else "[red]"
-            console.print(f"  {style}{name}: {status}[/]")
+        _print_task_results(_parallel_task_wait(task_ids))
 
 
 @app.command()
@@ -925,7 +907,6 @@ def ssh(
 ) -> None:
     """VMにSSH接続する"""
     import os
-    import subprocess
 
     client = get_client()
 
@@ -936,14 +917,10 @@ def ssh(
         stop_active_spinner()
         running = [v for v in all_vms if v.status == "PowerON"]
         if not running:
-            console.print("[red]稼働中のVMがありません[/red]")
-            raise typer.Exit(code=1)
-        console.print("\n[bold]稼働中のVM:[/bold]")
-        for i, v in enumerate(running, 1):
-            console.print(f"  {i}) {v.name}")
-        idx = int(questionary.text("\n番号を入力:").unsafe_ask()) - 1
-        vm_uuid = running[idx].uuid
-    elif len(target) == 36 and "-" in target:
+            fail("稼働中のVMがありません")
+        selected = select_from_list(running, lambda v: v.name, title="稼働中のVM:")
+        vm_uuid = selected.uuid
+    elif is_uuid(target):
         vm_uuid = target
     else:
         # 名前で検索
@@ -952,8 +929,7 @@ def ssh(
         stop_active_spinner()
         matched = [v for v in all_vms if v.name == target]
         if not matched:
-            console.print(f"[red]VM '{target}' が見つかりません[/red]")
-            raise typer.Exit(code=1)
+            fail(f"VM '{target}' が見つかりません")
         vm_uuid = matched[0].uuid
 
     # VM詳細からIPを取得
@@ -964,8 +940,7 @@ def ssh(
     nets = extra.get("service_networks", [])
 
     if not nets:
-        console.print("[red]ネットワーク情報がありません[/red]")
-        raise typer.Exit(code=1)
+        fail("ネットワーク情報がありません")
 
     net = nets[0]
     global_ip = net.get("global_ip", "")
@@ -977,8 +952,7 @@ def ssh(
     elif private_ip:
         host = private_ip
     else:
-        console.print("[red]IPアドレスが見つかりません[/red]")
-        raise typer.Exit(code=1)
+        fail("IPアドレスが見つかりません")
 
     # ユーザー名を自動検出（テンプレートの login_username）
     if user == "mdxuser":
@@ -1046,8 +1020,7 @@ def csv(
         matched_names = set(match_names(target, vm_names))
         vms = [v for v in all_vms if v.name in matched_names]
         if not vms:
-            console.print(f"[red]パターン '{target}' に一致するVMがありません[/red]")
-            raise typer.Exit(code=1)
+            fail(f"パターン '{target}' に一致するVMがありません")
     else:
         vms = all_vms
 
