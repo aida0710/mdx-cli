@@ -1,16 +1,13 @@
-import questionary
 import typer
-from rich.console import Console
 
 from mdx_cli.api.endpoints.templates import list_templates
 from mdx_cli.api.spinner import stop_active_spinner
-from mdx_cli.commands._common import get_client, resolve_project_id
+from mdx_cli.commands._common import fail, get_client, resolve_project_id, select_from_list
+from mdx_cli.console import console
 from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import TEMPLATE_COLUMNS
-from mdx_cli.settings import Settings
 
 app = typer.Typer(no_args_is_help=True, help="テンプレート管理")
-console = Console()
 
 
 
@@ -40,17 +37,17 @@ def show_cmd(
 
     if template_id:
         selected = next((t for t in templates if t.uuid == template_id), None)
-    else:
-        console.print("\n[bold]テンプレート:[/bold]")
-        for i, t in enumerate(templates, 1):
+    elif templates:
+        def _format(t) -> str:
             os_info = f" [cyan]{t.os_name or ''} {t.os_version or ''}[/cyan]" if t.os_name else ""
-            console.print(f"  {i}) {t.name}{os_info}")
-        idx = int(questionary.text("\n番号を入力:").unsafe_ask()) - 1
-        selected = templates[idx]
+            return f"{t.name}{os_info}"
+
+        selected = select_from_list(templates, _format, title="テンプレート:")
+    else:
+        selected = None
 
     if not selected:
-        console.print("[red]テンプレートが見つかりません[/red]")
-        raise typer.Exit(code=1)
+        fail("テンプレートが見つかりません")
 
     if json:
         from mdx_cli.output.formatting import render_json

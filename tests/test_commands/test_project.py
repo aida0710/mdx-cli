@@ -133,7 +133,7 @@ def test_project_select():
     ]
     with patch("mdx_cli.commands.project.list_projects", return_value=[org]):
         with patch("mdx_cli.commands.project.get_client"):
-            with patch("mdx_cli.commands.project.questionary") as mock_q:
+            with patch("mdx_cli.commands._common.questionary") as mock_q:
                 mock_q.text.return_value.unsafe_ask.return_value = "1"
                 with patch("mdx_cli.credentials.store.CredentialStore.save_project_id") as mock_save:
                     result = runner.invoke(app, ["select"])
