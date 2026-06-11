@@ -1,6 +1,6 @@
 from pydantic import BaseModel, ConfigDict, Field
 
-from mdx_cli.models.enums import ServiceLevel, VMStatus
+from mdx_cli.models.enums import ServiceLevel
 
 
 class VM(BaseModel):

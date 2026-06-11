@@ -110,14 +110,14 @@ def show(
     # ディスク
     disks = vm.hard_disks
     if disks:
-        console.print(f"\n[bold]ディスク:[/bold]")
+        console.print("\n[bold]ディスク:[/bold]")
         for d in disks:
             console.print(f"  #{d.get('disk_number', '?')}: {d.get('capacity', '?')} ({d.get('datastore', '')})")
 
     # ネットワーク
     nets = vm.service_networks
     if nets:
-        console.print(f"\n[bold]ネットワーク:[/bold]")
+        console.print("\n[bold]ネットワーク:[/bold]")
         for n in nets:
             ipv4 = ", ".join(n.get("ipv4_address", []))
             gip = n.get("global_ip", "")
@@ -131,7 +131,7 @@ def show(
     # ストレージネットワーク
     snets = vm.storage_networks
     if snets:
-        console.print(f"\n[bold]ストレージネットワーク:[/bold]")
+        console.print("\n[bold]ストレージネットワーク:[/bold]")
         for sn in snets:
             ipv4 = ", ".join(sn.get("ipv4_address", []))
             console.print(f"  アダプタ {sn.get('adapter_number', '?')}: {ipv4} ({sn.get('storage_network_type', '')})")
@@ -139,7 +139,7 @@ def show(
     # VMware Tools
     tools = extra.get("vmware_tools", {})
     if tools:
-        console.print(f"\n[bold]VMware Tools:[/bold]")
+        console.print("\n[bold]VMware Tools:[/bold]")
         console.print(f"  状態:     {tools.get('status', '-')}")
         console.print(f"  バージョン: {tools.get('version', '-')}")
 
@@ -354,7 +354,7 @@ def _resolve_service_level(service_level_opt: str | None) -> str:
 
 def _print_deploy_summary(plan: DeployPlan) -> None:
     vm_names = plan.vm_names
-    console.print(f"\n[bold]デプロイ内容:[/bold]")
+    console.print("\n[bold]デプロイ内容:[/bold]")
     console.print(f"  テンプレート: {plan.template.name}")
     console.print(f"  ディスク:     {plan.disk_size}GB / {plan.pack_type} x {plan.pack_num} / {plan.service_level}")
     console.print(f"  自動起動:     {'あり' if plan.power_on else 'なし'}")
@@ -738,10 +738,10 @@ def reconfigure(
             running_vms, lambda v: vm_action_path(v.uuid, "shutdown"), "シャットダウン中"
         )
         _wait_for_poweroff(running_vms)
-        console.print(f"  → 停止完了")
+        console.print("  → 停止完了")
 
     # 新しい構成を入力
-    console.print(f"\n[bold]新しい構成（Enterで変更なし）:[/bold]")
+    console.print("\n[bold]新しい構成（Enterで変更なし）:[/bold]")
 
     pack_type = ref.pack_type or "cpu"
     current_pack_num = ref.pack_num if ref.pack_num is not None else 3
@@ -769,7 +769,7 @@ def reconfigure(
         new_capacities.append(new_cap)
 
     # 確認
-    console.print(f"\n[bold]変更内容:[/bold]")
+    console.print("\n[bold]変更内容:[/bold]")
     console.print(
         f"  パック: {pack_type} x {current_pack_num} → {new_pack_num}"
     )
@@ -871,7 +871,7 @@ def destroy(
         _parallel_vm_action(running_vms, lambda v: vm_action_path(v.uuid, "power_off"), "停止中")
         console.print(f"  {len(running_vms)}台の停止リクエスト送信完了")
         _wait_for_poweroff(running_vms)
-        console.print(f"  → 停止完了")
+        console.print("  → 停止完了")
         console.print("")
 
     # 並列削除

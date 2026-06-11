@@ -1,5 +1,5 @@
 from typer.testing import CliRunner
-from unittest.mock import patch, call
+from unittest.mock import patch
 
 from mdx_cli.commands.auth import app
 
