@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from mdx_cli.models.enums import ServiceLevel, VMStatus
 
@@ -9,6 +9,15 @@ class VM(BaseModel):
     name: str
     status: str  # "PowerON", "PowerOFF" 等、API固有の文字列
     service_level: str = ""  # "スポット仮想マシン" 等の日本語文字列
+
+    # 詳細APIで返り、ロジックで参照する頻出フィールド（一覧APIには無い）。
+    # 表示にしか使わないフィールドは引き続き model_extra から参照する。
+    pack_type: str | None = None  # "cpu" / "gpu"
+    pack_num: int | None = None
+    host_name: str | None = None
+    hard_disks: list[dict] = Field(default_factory=list)
+    service_networks: list[dict] = Field(default_factory=list)
+    storage_networks: list[dict] = Field(default_factory=list)
 
 
 class VMDeployRequest(BaseModel):
