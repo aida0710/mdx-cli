@@ -602,3 +602,114 @@ def test_vm_deploy_pack_num_out_of_range_fails(tmp_path):
                     ])
                     assert result.exit_code == 1
                     assert "1〜152" in result.output
+
+
+# --- 対話フローのリグレッションテスト ---
+
+
+def test_vm_deploy_interactive_template_selection(tmp_path):
+    """-t 省略時はテンプレート一覧から番号選択できる。"""
+    key_file = tmp_path / "id.pub"
+    key_file.write_text("ssh-rsa AAAA...")
+
+    templates = [
+        _make_template(),
+        Template(uuid="tmpl-2", name="Debian 12", template_name="debian-12",
+                 os_type="Linux", lower_limit_disk=40),
+    ]
+    captured: list = []
+
+    def mock_deploy(client, req):
+        captured.append(req)
+        return VMDeployResponse(task_id=["task-1"])
+
+    with patch("mdx_cli.commands.vm.list_templates", return_value=templates), \
+         patch("mdx_cli.commands.vm.list_segments", return_value=[_make_segment()]), \
+         patch("mdx_cli.commands.vm.deploy_vm", side_effect=mock_deploy), \
+         patch("mdx_cli.commands.vm.get_client"), \
+         patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"), \
+         patch("mdx_cli.commands._common.questionary") as mock_common_q:
+        mock_common_q.text.return_value.unsafe_ask.return_value = "2"
+        result = runner.invoke(app, [
+            "deploy", "-n", "test-vm",
+            "--pack-type", "cpu", "--pack-num", "4",
+            "--disk", "40", "--service-level", "spot",
+            "-k", str(key_file), "-y", "--no-wait",
+        ])
+
+    assert result.exit_code == 0, result.output
+    assert "Debian 12" in result.output
+    assert captured[0].catalog == "tmpl-2"
+
+
+def test_vm_reconfigure_stops_running_vms_first():
+    """稼働中VMがあれば確認のうえシャットダウン→停止待ち→構成変更の順に実行する。"""
+    vms_brief = [_make_vm("worker-0", "uuid-0", status="PowerON")]
+    vms_detail = [_make_vm_with_details("worker-0", pack_type="cpu", pack_num=4, disk_count=1)]
+
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms_brief), \
+         patch("mdx_cli.commands.vm._fetch_vm_details", return_value=vms_detail), \
+         patch("mdx_cli.commands.vm.list_segments", return_value=[_make_segment()]), \
+         patch("mdx_cli.commands.vm._parallel_vm_action", return_value=[{}]) as mock_action, \
+         patch("mdx_cli.commands.vm._ensure_stopped") as mock_ensure, \
+         patch("mdx_cli.commands.vm.reconfigure_vm", return_value="task-1"), \
+         patch("mdx_cli.commands.vm.get_client"), \
+         patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"), \
+         patch("mdx_cli.commands._common.questionary") as mock_common_q, \
+         patch("mdx_cli.commands.vm.questionary") as mock_q:
+        mock_common_q.text.return_value.unsafe_ask.side_effect = ["8", "40"]
+        mock_q.confirm.return_value.unsafe_ask.return_value = True
+        result = runner.invoke(app, ["reconfigure", "worker-*", "-p", "proj-1", "--no-wait"])
+
+    assert result.exit_code == 0, result.output
+    # シャットダウンの一括実行 → 停止待ち の順で呼ばれる
+    assert mock_action.call_args[0][2] == "シャットダウン中"
+    mock_ensure.assert_called_once_with(vms_detail)
+
+
+def _make_vm_with_network(name="web-1", uuid="uuid-net", host_name=None):
+    data = {
+        "uuid": uuid,
+        "name": name,
+        "status": "PowerON",
+        "service_networks": [{
+            "adapter_number": 1,
+            "ipv4_address": ["10.15.0.7"],
+            "global_ip": "203.0.113.7",
+        }],
+    }
+    if host_name:
+        data["host_name"] = host_name
+    return VM.model_validate(data)
+
+
+def test_vm_ssh_builds_command_with_private_ip():
+    """名前指定でプライベートIPへのsshコマンドを組み立てて exec する。"""
+    brief = _make_vm("web-1", "uuid-net")
+    detail = _make_vm_with_network()
+
+    with patch("mdx_cli.commands.vm.list_vms", return_value=[brief]), \
+         patch("mdx_cli.commands.vm.get_vm", return_value=detail), \
+         patch("mdx_cli.commands.vm.get_client"), \
+         patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"), \
+         patch("os.execvp") as mock_exec:
+        result = runner.invoke(app, ["ssh", "web-1", "-p", "proj-1"])
+
+    assert result.exit_code == 0, result.output
+    mock_exec.assert_called_once_with("ssh", ["ssh", "mdxuser@10.15.0.7"])
+
+
+def test_vm_ssh_uses_global_ip_with_flag():
+    """--global 指定時はグローバルIPに接続する。"""
+    brief = _make_vm("web-1", "uuid-net")
+    detail = _make_vm_with_network()
+
+    with patch("mdx_cli.commands.vm.list_vms", return_value=[brief]), \
+         patch("mdx_cli.commands.vm.get_vm", return_value=detail), \
+         patch("mdx_cli.commands.vm.get_client"), \
+         patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"), \
+         patch("os.execvp") as mock_exec:
+        result = runner.invoke(app, ["ssh", "web-1", "-p", "proj-1", "--global"])
+
+    assert result.exit_code == 0, result.output
+    mock_exec.assert_called_once_with("ssh", ["ssh", "mdxuser@203.0.113.7"])
