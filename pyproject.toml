@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-mdx = "mdx_cli.main:app"
+mdx = "mdx_cli.main:cli"
 
 [build-system]
 requires = ["hatchling"]
