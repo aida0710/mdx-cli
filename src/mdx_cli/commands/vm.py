@@ -104,18 +104,18 @@ def show(
     console.print(f"  CPU:            {extra.get('cpu', '-')}")
     console.print(f"  メモリ:         {extra.get('memory', '-')}")
     console.print(f"  GPU:            {extra.get('gpu', '-')}")
-    console.print(f"  パック:         {extra.get('pack_type', '-')} x {extra.get('pack_num', '-')}")
+    console.print(f"  パック:         {vm.pack_type or '-'} x {vm.pack_num if vm.pack_num is not None else '-'}")
     console.print(f"  NVLink:         {extra.get('nvlink', '-')}")
 
     # ディスク
-    disks = extra.get("hard_disks", [])
+    disks = vm.hard_disks
     if disks:
         console.print(f"\n[bold]ディスク:[/bold]")
         for d in disks:
             console.print(f"  #{d.get('disk_number', '?')}: {d.get('capacity', '?')} ({d.get('datastore', '')})")
 
     # ネットワーク
-    nets = extra.get("service_networks", [])
+    nets = vm.service_networks
     if nets:
         console.print(f"\n[bold]ネットワーク:[/bold]")
         for n in nets:
@@ -129,7 +129,7 @@ def show(
                 console.print(f"    グローバルIP: {gip}")
 
     # ストレージネットワーク
-    snets = extra.get("storage_networks", [])
+    snets = vm.storage_networks
     if snets:
         console.print(f"\n[bold]ストレージネットワーク:[/bold]")
         for sn in snets:
@@ -486,12 +486,8 @@ def _check_reconfigure_homogeneity(vms: list) -> None:
 
     不一致の場合はエラー表示してtyper.Exitを送出する。
     """
-    pack_types = set()
-    disk_counts = set()
-    for v in vms:
-        extra = getattr(v, "model_extra", {}) or {}
-        pack_types.add(extra.get("pack_type"))
-        disk_counts.add(len(extra.get("hard_disks", [])))
+    pack_types = {v.pack_type for v in vms}
+    disk_counts = {len(v.hard_disks) for v in vms}
 
     if len(pack_types) > 1:
         fail(f"pack_type が混在しているため一括構成変更できません: {pack_types}")
@@ -723,10 +719,10 @@ def reconfigure(
         console.print(f"\n[bold]{ref.name}[/bold] の現在の構成:")
 
     console.print(f"  状態:     {ref.status}")
-    console.print(f"  パック:   {ref_extra.get('pack_type', 'cpu')} x {ref_extra.get('pack_num', '?')}")
+    console.print(f"  パック:   {ref.pack_type or 'cpu'} x {ref.pack_num if ref.pack_num is not None else '?'}")
     console.print(f"  CPU:      {ref_extra.get('cpu', '?')}")
     console.print(f"  メモリ:   {ref_extra.get('memory', '?')}")
-    ref_disks = ref_extra.get("hard_disks", [])
+    ref_disks = ref.hard_disks
     for d in ref_disks:
         console.print(f"  ディスク: #{d.get('disk_number', '?')}: {d.get('capacity', '?')}")
 
@@ -747,8 +743,8 @@ def reconfigure(
     # 新しい構成を入力
     console.print(f"\n[bold]新しい構成（Enterで変更なし）:[/bold]")
 
-    pack_type = ref_extra.get("pack_type", "cpu")
-    current_pack_num = ref_extra.get("pack_num", 3)
+    pack_type = ref.pack_type or "cpu"
+    current_pack_num = ref.pack_num if ref.pack_num is not None else 3
     spec = PACK_SPECS.get(pack_type, PACK_SPECS["cpu"])
 
     new_pack_num = int(questionary.text(
@@ -795,17 +791,15 @@ def reconfigure(
     seg_name_to_uuid = {s.name: s.uuid for s in segments}
 
     def _build_config(vm) -> dict:
-        extra = getattr(vm, "model_extra", {}) or {}
-        disks = extra.get("hard_disks", [])
         new_disks = []
-        for d, new_cap in zip(disks, new_capacities):
+        for d, new_cap in zip(vm.hard_disks, new_capacities):
             new_disks.append({
                 "disk_number": d.get("disk_number", 1),
                 "device_key": d.get("device_key", 2000),
                 "capacity": new_cap,
             })
         network_adapters = []
-        for n in extra.get("service_networks", []):
+        for n in vm.service_networks:
             network_adapters.append({
                 "adapter_number": n.get("adapter_number", 1),
                 "segment": seg_name_to_uuid.get(n.get("segment", ""), default_seg),
@@ -948,9 +942,7 @@ def ssh(
     vm = get_vm(client, vm_uuid)
     stop_active_spinner()
 
-    extra = getattr(vm, "model_extra", {}) or {}
-    nets = extra.get("service_networks", [])
-
+    nets = vm.service_networks
     if not nets:
         fail("ネットワーク情報がありません")
 
@@ -968,7 +960,7 @@ def ssh(
 
     # ユーザー名を自動検出（テンプレートの login_username）
     if user == "mdxuser":
-        host_name = extra.get("host_name", "")
+        host_name = vm.host_name or ""
         if host_name:
             try:
                 pid = resolve_project_id(project_id)
