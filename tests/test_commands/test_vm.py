@@ -511,3 +511,73 @@ def test_vm_deploy_interactive_warns_when_no_pubkey(tmp_path):
     assert "警告" in result.output
     assert ".pub" in result.output
     assert captured_requests[0].shared_key == "ssh-ed25519 AAAAKEY2"
+
+
+# --- _wait_for_poweroff タイムアウト検出 ---
+
+
+def test_wait_for_poweroff_returns_timed_out_vms():
+    """max_polls までに停止しなかったVMを返す。"""
+    import httpx
+    import respx
+
+    from mdx_cli.commands.vm import _wait_for_poweroff
+
+    vms = [_make_vm("vm-on", "uuid-on"), _make_vm("vm-off", "uuid-off")]
+    with patch("mdx_cli.commands.vm.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")):
+        with respx.mock(base_url="https://oprpl.mdx.jp") as router:
+            router.get("/api/vm/uuid-on/").mock(
+                return_value=httpx.Response(200, json={"status": "PowerON"})
+            )
+            router.get("/api/vm/uuid-off/").mock(
+                return_value=httpx.Response(200, json={"status": "PowerOFF"})
+            )
+            still_running = _wait_for_poweroff(vms, poll_interval=0, max_polls=2)
+
+    assert [v.name for v in still_running] == ["vm-on"]
+
+
+def test_wait_for_poweroff_all_stopped_returns_empty():
+    """全VMが停止すれば空リストを返す。"""
+    import httpx
+    import respx
+
+    from mdx_cli.commands.vm import _wait_for_poweroff
+
+    vms = [_make_vm("vm-off", "uuid-off", status="PowerON")]
+    with patch("mdx_cli.commands.vm.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")):
+        with respx.mock(base_url="https://oprpl.mdx.jp") as router:
+            router.get("/api/vm/uuid-off/").mock(
+                return_value=httpx.Response(200, json={"status": "PowerOFF"})
+            )
+            still_running = _wait_for_poweroff(vms, poll_interval=0, max_polls=2)
+
+    assert still_running == []
+
+
+def test_ensure_stopped_aborts_on_decline_when_timeout():
+    """停止を確認できなかったVMがあり、続行を拒否したら Abort。"""
+    import typer
+    import pytest
+
+    from mdx_cli.commands.vm import _ensure_stopped
+
+    vm = _make_vm("vm-on", "uuid-on")
+    with patch("mdx_cli.commands.vm._wait_for_poweroff", return_value=[vm]):
+        with patch("mdx_cli.commands.vm.questionary") as mock_q:
+            mock_q.confirm.return_value.unsafe_ask.return_value = False
+            with pytest.raises(typer.Abort):
+                _ensure_stopped([vm])
+            # 危険側に倒すため default=False で確認する
+            assert mock_q.confirm.call_args.kwargs.get("default") is False
+
+
+def test_ensure_stopped_no_timeout_no_confirm():
+    """全台停止できたら確認なしで戻る。"""
+    from mdx_cli.commands.vm import _ensure_stopped
+
+    vm = _make_vm("vm-off", "uuid-off")
+    with patch("mdx_cli.commands.vm._wait_for_poweroff", return_value=[]):
+        with patch("mdx_cli.commands.vm.questionary") as mock_q:
+            _ensure_stopped([vm])
+            mock_q.confirm.assert_not_called()
