@@ -557,6 +557,43 @@ def test_wait_for_poweroff_all_stopped_returns_empty():
     assert still_running == []
 
 
+def test_wait_for_poweroff_survives_non_json_response():
+    """サーバー負荷時の非JSONレスポンスでクラッシュしない。
+
+    70台 destroy の停止待ち中に JSONDecodeError でコマンド全体が
+    落ちたバグの回帰テスト。一時エラーは次の周期で再確認する。
+    """
+    import httpx
+    import respx
+
+    from mdx_cli.commands.vm import _wait_for_poweroff
+
+    vms = [_make_vm("vm-1", "uuid-1")]
+    with patch("mdx_cli.commands.vm.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")):
+        with respx.mock(base_url="https://oprpl.mdx.jp") as router:
+            router.get("/api/vm/uuid-1/").mock(
+                side_effect=[
+                    httpx.Response(502, text="<html>Bad Gateway</html>"),
+                    httpx.Response(200, json={"status": "PowerOFF"}),
+                ]
+            )
+            still_running = _wait_for_poweroff(vms, poll_interval=0, max_polls=5)
+
+    assert still_running == []
+
+
+def test_wait_for_poweroff_uses_low_concurrency():
+    """VM詳細APIは遅いため並列数を8に制限して呼び出す。"""
+    from mdx_cli.commands.vm import _wait_for_poweroff
+
+    vms = [_make_vm("vm-1", "uuid-1")]
+    with patch("mdx_cli.commands.vm.get_auth_context", return_value=("tok", "https://oprpl.mdx.jp")):
+        with patch("mdx_cli.commands.vm.parallel_poll", return_value=[True]) as mock_poll:
+            _wait_for_poweroff(vms, poll_interval=0, max_polls=2)
+
+    assert mock_poll.call_args.kwargs.get("max_concurrent") == 8
+
+
 def test_ensure_stopped_aborts_on_decline_when_timeout():
     """停止を確認できなかったVMがあり、続行を拒否したら Abort。"""
     import typer

@@ -144,6 +144,72 @@ def parallel_post(
     return list(asyncio.run(_run()))
 
 
+# --- 条件ポーリング ---
+
+async def _poll_one(
+    client: httpx.AsyncClient,
+    path: str,
+    semaphore: asyncio.Semaphore,
+    is_done: Callable[[dict], bool],
+    poll_interval: int,
+    max_polls: int,
+    index: int,
+    on_done: Callable[[int], None] | None,
+) -> bool:
+    """1つのパスをポーリングして is_done(json) が True になるまで待つ。
+
+    一時エラー（5xx・負荷時の404・非JSONボディ・接続エラー・タイムアウト）は
+    その周期を諦めて次の周期で再確認する（クラッシュさせない）。
+    セマフォはリクエスト中のみ保持し、sleep中は解放する。遅いエンドポイントに
+    同時リクエストが集中するのを防ぎつつ、他パスのポーリング周期は止めない。
+    """
+    for _ in range(max_polls):
+        try:
+            async with semaphore:
+                resp = await client.get(path)
+            resp.raise_for_status()
+            data = resp.json()
+        except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException, ValueError) as e:
+            # ValueError は非JSONボディ（JSONDecodeError）を含む
+            logger.debug("poll %s failed (%s), retry", path, e)
+            await asyncio.sleep(poll_interval)
+            continue
+        if is_done(data):
+            if on_done:
+                on_done(index)
+            return True
+        await asyncio.sleep(poll_interval)
+    return False
+
+
+def parallel_poll(
+    base_url: str,
+    token: str,
+    paths: list[str],
+    is_done: Callable[[dict], bool],
+    poll_interval: int = 5,
+    max_polls: int = 60,
+    max_concurrent: int = MAX_CONCURRENT_GET,
+    on_done: Callable[[int], None] | None = None,
+) -> list[bool]:
+    """複数パスを並列ポーリングし、各レスポンスJSONが is_done を満たすまで待つ。
+
+    戻り値: paths と同順の bool リスト（True=条件成立、False=max_polls超過）。
+    """
+    settings = get_settings()
+
+    async def _run():
+        semaphore = asyncio.Semaphore(max_concurrent)
+        async with _make_async_client(base_url, token, settings.request_timeout) as client:
+            tasks = [
+                _poll_one(client, path, semaphore, is_done, poll_interval, max_polls, i, on_done)
+                for i, path in enumerate(paths)
+            ]
+            return await asyncio.gather(*tasks)
+
+    return list(asyncio.run(_run()))
+
+
 # --- タスク待機 ---
 
 async def _wait_one(
