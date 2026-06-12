@@ -4,7 +4,7 @@ import httpx
 import pytest
 import respx
 
-from mdx_cli.api.parallel import parallel_get, parallel_wait
+from mdx_cli.api.parallel import parallel_get, parallel_poll, parallel_wait
 
 
 @respx.mock
@@ -222,3 +222,129 @@ def test_parallel_wait_404_eventually_returns_unknown():
     )
     # エラーなく結果が返る（status は不明）
     assert len(results) == 1
+
+
+# --- parallel_poll ---
+
+
+@respx.mock
+def test_parallel_poll_returns_true_when_condition_met():
+    """初回レスポンスで条件成立なら True を返す。"""
+    respx.get("https://oprpl.mdx.jp/api/vm/vm-1/").mock(
+        return_value=httpx.Response(200, json={"status": "PowerOFF"})
+    )
+    results = parallel_poll(
+        base_url="https://oprpl.mdx.jp",
+        token="test-token",
+        paths=["/api/vm/vm-1/"],
+        is_done=lambda data: data.get("status") != "PowerON",
+        poll_interval=0,
+        max_polls=3,
+    )
+    assert results == [True]
+
+
+@respx.mock
+def test_parallel_poll_polls_until_condition():
+    """条件成立までポーリングを繰り返す。"""
+    respx.get("https://oprpl.mdx.jp/api/vm/vm-1/").mock(
+        side_effect=[
+            httpx.Response(200, json={"status": "PowerON"}),
+            httpx.Response(200, json={"status": "PowerON"}),
+            httpx.Response(200, json={"status": "PowerOFF"}),
+        ]
+    )
+    results = parallel_poll(
+        base_url="https://oprpl.mdx.jp",
+        token="test-token",
+        paths=["/api/vm/vm-1/"],
+        is_done=lambda data: data.get("status") != "PowerON",
+        poll_interval=0,
+        max_polls=5,
+    )
+    assert results == [True]
+
+
+@respx.mock
+def test_parallel_poll_returns_false_after_max_polls():
+    """max_polls までに条件が成立しなければ False。"""
+    respx.get("https://oprpl.mdx.jp/api/vm/vm-1/").mock(
+        return_value=httpx.Response(200, json={"status": "PowerON"})
+    )
+    results = parallel_poll(
+        base_url="https://oprpl.mdx.jp",
+        token="test-token",
+        paths=["/api/vm/vm-1/"],
+        is_done=lambda data: data.get("status") != "PowerON",
+        poll_interval=0,
+        max_polls=2,
+    )
+    assert results == [False]
+
+
+@respx.mock
+def test_parallel_poll_survives_non_json_response():
+    """502エラーページや空ボディはクラッシュせず次の周期で再確認する。
+
+    70台 destroy の停止待ち中にサーバーが非JSONレスポンスを返し、
+    JSONDecodeError でコマンド全体が落ちたバグの回帰テスト。
+    """
+    respx.get("https://oprpl.mdx.jp/api/vm/vm-1/").mock(
+        side_effect=[
+            httpx.Response(502, text="<html>Bad Gateway</html>"),
+            httpx.Response(200, content=b""),
+            httpx.Response(200, json={"status": "PowerOFF"}),
+        ]
+    )
+    results = parallel_poll(
+        base_url="https://oprpl.mdx.jp",
+        token="test-token",
+        paths=["/api/vm/vm-1/"],
+        is_done=lambda data: data.get("status") != "PowerON",
+        poll_interval=0,
+        max_polls=5,
+    )
+    assert results == [True]
+
+
+@respx.mock
+def test_parallel_poll_survives_network_errors():
+    """接続エラー・タイムアウトもクラッシュせずポーリングを継続する。"""
+    respx.get("https://oprpl.mdx.jp/api/vm/vm-1/").mock(
+        side_effect=[
+            httpx.ReadTimeout("timeout"),
+            httpx.ConnectError("connection failed"),
+            httpx.Response(200, json={"status": "PowerOFF"}),
+        ]
+    )
+    results = parallel_poll(
+        base_url="https://oprpl.mdx.jp",
+        token="test-token",
+        paths=["/api/vm/vm-1/"],
+        is_done=lambda data: data.get("status") != "PowerON",
+        poll_interval=0,
+        max_polls=5,
+    )
+    assert results == [True]
+
+
+@respx.mock
+def test_parallel_poll_on_done_called_with_index():
+    """条件成立時に on_done が paths のインデックスで呼ばれる。"""
+    respx.get("https://oprpl.mdx.jp/api/vm/vm-1/").mock(
+        return_value=httpx.Response(200, json={"status": "PowerOFF"})
+    )
+    respx.get("https://oprpl.mdx.jp/api/vm/vm-2/").mock(
+        return_value=httpx.Response(200, json={"status": "PowerOFF"})
+    )
+    called: list[int] = []
+    parallel_poll(
+        base_url="https://oprpl.mdx.jp",
+        token="test-token",
+        paths=["/api/vm/vm-1/", "/api/vm/vm-2/"],
+        is_done=lambda data: data.get("status") != "PowerON",
+        poll_interval=0,
+        max_polls=3,
+        on_done=called.append,
+    )
+    assert sorted(called) == [0, 1]

@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import httpx
 import questionary
 from questionary import Choice
 import typer
@@ -15,7 +14,7 @@ from mdx_cli.api.endpoints.vms import (
     sync_vms,
     vm_action_path,
 )
-from mdx_cli.api.parallel import parallel_post, parallel_wait
+from mdx_cli.api.parallel import parallel_poll, parallel_post, parallel_wait
 from mdx_cli.api.spinner import progress_status, stop_active_spinner
 from mdx_cli.commands._common import (
     fail,
@@ -40,7 +39,6 @@ from mdx_cli.output.tables import VM_COLUMNS
 from mdx_cli.settings import get_settings
 
 app = typer.Typer(no_args_is_help=True, help="仮想マシン管理")
-
 
 
 @app.command("list")
@@ -465,32 +463,21 @@ def _wait_for_poweroff(running_vms: list, poll_interval: int = 5, max_polls: int
     戻り値: タイムアウト（poll_interval × max_polls）までに停止を
     確認できなかったVMのリスト。空なら全台停止。
     """
-    import asyncio
-
     token, base_url = get_auth_context()
-    settings = get_settings()
-    resolved = base_url if base_url.endswith("/") else base_url + "/"
 
     with progress_status("停止待機中", len(running_vms)) as progress:
-        async def _run():
-            async with httpx.AsyncClient(
-                base_url=resolved,
-                timeout=settings.request_timeout,
-                headers={"Authorization": f"JWT {token}"},
-            ) as ac:
-                async def _poll(vm):
-                    for _ in range(max_polls):
-                        resp = await ac.get(f"/api/vm/{vm.uuid}/")
-                        if resp.json().get("status") != "PowerON":
-                            progress.advance(f"完了: {vm.name}")
-                            return None
-                        await asyncio.sleep(poll_interval)
-                    return vm
-                return await asyncio.gather(*[_poll(v) for v in running_vms])
+        results = parallel_poll(
+            base_url,
+            token,
+            [f"/api/vm/{v.uuid}/" for v in running_vms],
+            is_done=lambda data: data.get("status") != "PowerON",
+            poll_interval=poll_interval,
+            max_polls=max_polls,
+            max_concurrent=8,  # VM詳細APIは遅いため低並列に抑える
+            on_done=lambda i: progress.advance(f"完了: {running_vms[i].name}"),
+        )
 
-        results = asyncio.run(_run())
-
-    return [v for v in results if v is not None]
+    return [v for v, done in zip(running_vms, results) if not done]
 
 
 def _ensure_stopped(running_vms: list) -> None:
