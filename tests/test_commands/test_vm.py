@@ -515,6 +515,91 @@ def test_vm_deploy_interactive_warns_when_no_pubkey(tmp_path):
     assert captured_requests[0].shared_key == "ssh-ed25519 AAAAKEY2"
 
 
+# --- _resolve_vm_uuid: UUID / 名前 / 一覧選択 の解決 ---
+
+
+def test_resolve_vm_uuid_passes_through_uuid():
+    """UUID指定はAPIを呼ばずそのまま返す"""
+    from mdx_cli.commands.vm import _resolve_vm_uuid
+
+    with patch("mdx_cli.commands.vm.list_vms") as mock_list:
+        result = _resolve_vm_uuid(None, "00000000-0000-0000-0000-000000000001", None)
+
+    assert result == "00000000-0000-0000-0000-000000000001"
+    mock_list.assert_not_called()
+
+
+def test_resolve_vm_uuid_by_name():
+    """名前指定は一覧から一致するVMのUUIDを返す"""
+    from mdx_cli.commands.vm import _resolve_vm_uuid
+
+    vms = [_make_vm("web-1", "uuid-1"), _make_vm("web-2", "uuid-2")]
+    with patch("mdx_cli.commands.vm.list_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+            result = _resolve_vm_uuid(None, "web-2", None)
+
+    assert result == "uuid-2"
+
+
+def test_resolve_vm_uuid_name_not_found_fails():
+    """名前が見つからなければ終了コード1"""
+    import pytest
+    import typer
+
+    from mdx_cli.commands.vm import _resolve_vm_uuid
+
+    with patch("mdx_cli.commands.vm.list_vms", return_value=[_make_vm("web-1", "uuid-1")]):
+        with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+            with pytest.raises(typer.Exit) as exc_info:
+                _resolve_vm_uuid(None, "no-such-vm", None)
+
+    assert exc_info.value.exit_code == 1
+
+
+def test_resolve_vm_uuid_no_target_selects_from_list():
+    """target省略時は一覧から選択する"""
+    from mdx_cli.commands.vm import _resolve_vm_uuid
+
+    vms = [_make_vm("web-1", "uuid-1"), _make_vm("web-2", "uuid-2")]
+    with patch("mdx_cli.commands.vm.list_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+            with patch("mdx_cli.commands.vm.select_from_list", return_value=vms[1]) as mock_sel:
+                result = _resolve_vm_uuid(None, None, None)
+
+    assert result == "uuid-2"
+    assert mock_sel.call_args.args[0] == vms
+
+
+def test_resolve_vm_uuid_running_only_filters_selection():
+    """running_only=True なら稼働中VMだけを選択肢に出す"""
+    from mdx_cli.commands.vm import _resolve_vm_uuid
+
+    vms = [_make_vm("on-1", "uuid-1"), _make_vm("off-1", "uuid-2", status="PowerOFF")]
+    with patch("mdx_cli.commands.vm.list_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+            with patch("mdx_cli.commands.vm.select_from_list", return_value=vms[0]) as mock_sel:
+                result = _resolve_vm_uuid(None, None, None, running_only=True)
+
+    assert result == "uuid-1"
+    assert [v.name for v in mock_sel.call_args.args[0]] == ["on-1"]
+
+
+def test_resolve_vm_uuid_running_only_no_running_fails():
+    """running_only=True で稼働中VMがなければ終了コード1"""
+    import pytest
+    import typer
+
+    from mdx_cli.commands.vm import _resolve_vm_uuid
+
+    vms = [_make_vm("off-1", "uuid-1", status="PowerOFF")]
+    with patch("mdx_cli.commands.vm.list_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+            with pytest.raises(typer.Exit) as exc_info:
+                _resolve_vm_uuid(None, None, None, running_only=True)
+
+    assert exc_info.value.exit_code == 1
+
+
 # --- _wait_for_poweroff タイムアウト検出 ---
 
 

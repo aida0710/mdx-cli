@@ -2,6 +2,7 @@ import questionary
 import typer
 
 from mdx_cli.api.endpoints.auth import sso_login
+from mdx_cli.commands._common import fail
 from mdx_cli.console import console
 from mdx_cli.credentials.store import get_store
 from mdx_cli.settings import get_settings
@@ -41,8 +42,7 @@ def login() -> None:
     )
 
     if token is None:
-        console.print("[red]ログインに失敗しました。認証情報を確認してください。[/red]")
-        raise typer.Exit(code=1)
+        fail("ログインに失敗しました。認証情報を確認してください。")
 
     store.save_credentials(username, password)
     store.save_token(token)

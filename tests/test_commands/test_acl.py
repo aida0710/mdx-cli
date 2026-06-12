@@ -24,6 +24,72 @@ def _make_acl(**overrides):
     return ACL(**{**_ACL_FIELDS, **overrides})
 
 
+# --- _prompt_acl_fields ---
+
+
+def test_prompt_acl_fields_add_mode_defaults():
+    """新規追加時はアドレス系の初期値を使い、入力値を dict で返す"""
+    from mdx_cli.commands.acl import _prompt_acl_fields
+
+    with patch("mdx_cli.commands.acl.questionary") as mock_q:
+        mock_q.select.return_value.unsafe_ask.return_value = "TCP"
+        mock_q.text.return_value.unsafe_ask.side_effect = [
+            "0.0.0.0", "0.0.0.0", "Any",  # src
+            "10.0.0.1", "255.255.255.255", "22",  # dst
+        ]
+        fields = _prompt_acl_fields()
+
+    assert fields == {
+        "protocol": "TCP",
+        "src_address": "0.0.0.0",
+        "src_mask": "0.0.0.0",
+        "src_port": "Any",
+        "dst_address": "10.0.0.1",
+        "dst_mask": "255.255.255.255",
+        "dst_port": "22",
+    }
+    # 新規追加時のデフォルト値
+    text_defaults = [c.kwargs.get("default") for c in mock_q.text.call_args_list]
+    assert text_defaults == ["0.0.0.0", "0.0.0.0", "Any", "", "255.255.255.255", "Any"]
+
+
+def test_prompt_acl_fields_edit_mode_uses_current_values_as_defaults():
+    """編集時は既存ACLの現在値をデフォルトにする"""
+    from mdx_cli.commands.acl import _prompt_acl_fields
+
+    selected = _make_acl()
+    with patch("mdx_cli.commands.acl.questionary") as mock_q:
+        mock_q.select.return_value.unsafe_ask.return_value = "UDP"
+        mock_q.text.return_value.unsafe_ask.side_effect = [
+            "0.0.0.0", "0", "Any",
+            "10.0.0.1", "32", "80",
+        ]
+        fields = _prompt_acl_fields(selected)
+
+    assert fields["protocol"] == "UDP"
+    assert fields["dst_port"] == "80"
+    assert mock_q.select.call_args.kwargs.get("default") == "TCP"
+    text_defaults = [c.kwargs.get("default") for c in mock_q.text.call_args_list]
+    assert text_defaults == ["0.0.0.0", "0", "Any", "10.0.0.1", "32", "22"]
+
+
+def test_prompt_acl_fields_icmp_skips_port_prompts():
+    """ICMP はポート入力をスキップする（新規時は Any、編集時は現在値を維持）"""
+    from mdx_cli.commands.acl import _prompt_acl_fields
+
+    with patch("mdx_cli.commands.acl.questionary") as mock_q:
+        mock_q.select.return_value.unsafe_ask.return_value = "ICMP"
+        mock_q.text.return_value.unsafe_ask.side_effect = [
+            "0.0.0.0", "0.0.0.0",  # src（ポートなし）
+            "10.0.0.1", "255.255.255.255",  # dst（ポートなし）
+        ]
+        fields = _prompt_acl_fields()
+
+    assert fields["src_port"] == "Any"
+    assert fields["dst_port"] == "Any"
+    assert mock_q.text.return_value.unsafe_ask.call_count == 4
+
+
 def test_acl_list_json():
     acls = [_make_acl()]
     with patch("mdx_cli.commands.acl.list_acls", return_value=acls):

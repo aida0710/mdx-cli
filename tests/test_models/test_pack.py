@@ -1,4 +1,4 @@
-from mdx_cli.models.pack import PACK_SPECS
+from mdx_cli.models.pack import PACK_SPECS, pack_choice_label
 
 
 def test_pack_specs_cpu():
@@ -25,3 +25,16 @@ def test_resource_summary_cpu():
 def test_resource_summary_gpu():
     """GPUパックは コア数 / GPU数 / RAM を表示する"""
     assert PACK_SPECS["gpu"].resource_summary(2) == "36コア / 2GPU / 115.2GB RAM"
+
+
+# --- pack_choice_label ---
+
+
+def test_pack_choice_label_cpu():
+    """CPUパックの選択肢ラベルを PACK_SPECS から生成する"""
+    assert pack_choice_label("cpu") == "cpu（1パック = 1コア / 1.51GB RAM）"
+
+
+def test_pack_choice_label_gpu():
+    """GPUパックの選択肢ラベルは GPU数・VRAM も含む"""
+    assert pack_choice_label("gpu") == "gpu（1パック = 18コア / 1GPU / 57.6GB RAM / 40GB VRAM）"

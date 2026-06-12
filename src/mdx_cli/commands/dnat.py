@@ -11,10 +11,12 @@ from mdx_cli.api.endpoints.networks import (
 from mdx_cli.api.spinner import stop_active_spinner
 from mdx_cli.commands._common import (
     fail,
+    find_by_uuid,
     get_client,
     resolve_project_id,
     resolve_segment_id,
     select_from_list,
+    select_or_exit,
 )
 from mdx_cli.console import console
 from mdx_cli.output.formatting import render
@@ -94,19 +96,15 @@ def dnat_edit(
     dnats = list_dnats(client, pid)
     stop_active_spinner()
 
-    if not dnats:
-        console.print("[yellow]DNATルールがありません[/yellow]")
-        raise typer.Exit()
-
     if not dnat_id:
-        selected = select_from_list(
-            dnats, _format_dnat, title="DNAT一覧:", prompt="編集する番号:"
+        selected = select_or_exit(
+            dnats, _format_dnat,
+            title="DNAT一覧:", prompt="編集する番号:",
+            empty_message="DNATルールがありません",
         )
         dnat_id = selected.uuid
     else:
-        selected = next((d for d in dnats if d.uuid == dnat_id), None)
-        if not selected:
-            fail(f"DNAT {dnat_id} が見つかりません")
+        selected = find_by_uuid(dnats, dnat_id, label="DNAT")
 
     # グローバルIP選択
     ips = list_assignable_ips(client, pid)
@@ -160,12 +158,10 @@ def dnat_delete(
         dnats = list_dnats(client, pid)
         stop_active_spinner()
 
-        if not dnats:
-            console.print("[yellow]DNATルールがありません[/yellow]")
-            raise typer.Exit()
-
-        selected = select_from_list(
-            dnats, _format_dnat, title="DNAT一覧:", prompt="削除する番号:"
+        selected = select_or_exit(
+            dnats, _format_dnat,
+            title="DNAT一覧:", prompt="削除する番号:",
+            empty_message="DNATルールがありません",
         )
         dnat_id = selected.uuid
 
