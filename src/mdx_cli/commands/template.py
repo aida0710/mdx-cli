@@ -4,7 +4,7 @@ from mdx_cli.api.endpoints.templates import list_templates
 from mdx_cli.api.spinner import stop_active_spinner
 from mdx_cli.commands._common import fail, get_client, resolve_project_id, select_from_list
 from mdx_cli.console import console
-from mdx_cli.output.formatting import render
+from mdx_cli.output.formatting import render, render_json
 from mdx_cli.output.tables import TEMPLATE_COLUMNS
 
 app = typer.Typer(no_args_is_help=True, help="テンプレート管理")
@@ -50,7 +50,6 @@ def show_cmd(
         fail("テンプレートが見つかりません")
 
     if json:
-        from mdx_cli.output.formatting import render_json
         render_json(selected)
         return
 

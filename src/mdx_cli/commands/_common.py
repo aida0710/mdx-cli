@@ -140,6 +140,31 @@ def select_from_list(
     return items[idx]
 
 
+def select_or_exit(
+    items: Sequence[T],
+    formatter: Callable[[T], str],
+    title: str | None = None,
+    prompt: str = "番号を入力:",
+    empty_message: str = "対象がありません",
+) -> T:
+    """一覧から1件選択する。空なら黄色メッセージを表示して正常終了する。
+
+    edit / delete 系コマンドの「ID未指定なら一覧から選択」フロー用。
+    """
+    if not items:
+        console.print(f"[yellow]{empty_message}[/yellow]")
+        raise typer.Exit()
+    return select_from_list(items, formatter, title=title, prompt=prompt)
+
+
+def find_by_uuid(items: Sequence[T], uuid: str, label: str) -> T:
+    """uuid が一致する要素を返す。見つからなければエラー表示して終了する。"""
+    found = next((i for i in items if i.uuid == uuid), None)
+    if found is None:
+        fail(f"{label} {uuid} が見つかりません")
+    return found
+
+
 def resolve_segment_id(client, segment_id: str | None, project_id: str | None) -> str:
     """セグメントIDを解決する。指定があればそのまま、なければ一覧から選択。"""
     if segment_id:

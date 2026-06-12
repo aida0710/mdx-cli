@@ -14,7 +14,7 @@ from mdx_cli.api.endpoints.vms import (
     sync_vms,
     vm_action_path,
 )
-from mdx_cli.api.parallel import parallel_poll, parallel_post, parallel_wait
+from mdx_cli.api.parallel import parallel_get, parallel_poll, parallel_post, parallel_wait
 from mdx_cli.api.spinner import progress_status, stop_active_spinner
 from mdx_cli.commands._common import (
     fail,
@@ -33,8 +33,8 @@ from mdx_cli.commands._name_pattern import (
     match_names,
 )
 from mdx_cli.console import console
-from mdx_cli.models.pack import PACK_SPECS
-from mdx_cli.output.formatting import render
+from mdx_cli.models.pack import PACK_SPECS, pack_choice_label
+from mdx_cli.output.formatting import render, render_json
 from mdx_cli.output.tables import VM_COLUMNS
 from mdx_cli.settings import get_settings
 
@@ -53,6 +53,43 @@ def list_cmd(
     render(vms, VM_COLUMNS, json_mode=json)
 
 
+def _resolve_vm_uuid(
+    client,
+    target: str | None,
+    project_id: str | None,
+    running_only: bool = False,
+) -> str:
+    """VM指定（UUID / 名前 / 省略時は一覧から選択）を UUID に解決する。
+
+    running_only=True は一覧選択時のみ稼働中VMに絞る（名前・UUID指定はそのまま）。
+    """
+    if target and is_uuid(target):
+        return target
+
+    pid = resolve_project_id(project_id)
+    all_vms = list_vms(client, pid)
+    stop_active_spinner()
+
+    if target:
+        matched = [v for v in all_vms if v.name == target]
+        if not matched:
+            fail(f"VM '{target}' が見つかりません")
+        return matched[0].uuid
+
+    if running_only:
+        candidates = [v for v in all_vms if v.status == "PowerON"]
+        if not candidates:
+            fail("稼働中のVMがありません")
+        selected = select_from_list(candidates, lambda v: v.name, title="稼働中のVM:")
+    else:
+        if not all_vms:
+            fail("VMがありません")
+        selected = select_from_list(
+            all_vms, lambda v: f"{v.name} [{v.status}]", title="VM一覧:"
+        )
+    return selected.uuid
+
+
 @app.command()
 def show(
     target: str = typer.Argument(None, help="VM ID または名前（省略時は一覧から選択）"),
@@ -61,35 +98,10 @@ def show(
 ) -> None:
     """VM詳細"""
     client = get_client(silent=json)
-
-    # UUID指定
-    if target and is_uuid(target):
-        vm = get_vm(client, target)
-    elif target:
-        # 名前で検索
-        pid = resolve_project_id(project_id)
-        all_vms = list_vms(client, pid)
-        stop_active_spinner()
-        matched = [v for v in all_vms if v.name == target]
-        if not matched:
-            fail(f"VM '{target}' が見つかりません")
-        vm = get_vm(client, matched[0].uuid)
-    else:
-        # 一覧から選択
-        pid = resolve_project_id(project_id)
-        all_vms = list_vms(client, pid)
-        stop_active_spinner()
-        if not all_vms:
-            fail("VMがありません")
-        selected = select_from_list(
-            all_vms, lambda v: f"{v.name} [{v.status}]", title="VM一覧:"
-        )
-        vm = get_vm(client, selected.uuid)
-
+    vm = get_vm(client, _resolve_vm_uuid(client, target, project_id))
     stop_active_spinner()
 
     if json:
-        from mdx_cli.output.formatting import render_json
         render_json(vm)
         return
 
@@ -336,10 +348,7 @@ def _resolve_pack_type(pack_type_opt: str | None) -> str:
         return pack_type_opt
     return questionary.select(
         "パックタイプ:",
-        choices=[
-            Choice("cpu（1パック = 1コア / 1.51GB RAM）", value="cpu"),
-            Choice("gpu（1パック = 18コア / 1GPU / 57.6GB RAM / 40GB VRAM）", value="gpu"),
-        ],
+        choices=[Choice(pack_choice_label(pt), value=pt) for pt in PACK_SPECS],
     ).unsafe_ask()
 
 
@@ -422,7 +431,6 @@ def _fetch_vm_details(client, vms_brief: list) -> list:
     単一の場合は渡されたクライアントで同期取得。
     複数の場合は parallel_get で並列化し、完了ごとにVM名を進捗表示する。
     """
-    from mdx_cli.api.parallel import parallel_get
     from mdx_cli.models.vm import VM
 
     if len(vms_brief) == 1:
@@ -936,28 +944,7 @@ def ssh(
     import os
 
     client = get_client()
-
-    if not target:
-        # 一覧から選択
-        pid = resolve_project_id(project_id)
-        all_vms = list_vms(client, pid)
-        stop_active_spinner()
-        running = [v for v in all_vms if v.status == "PowerON"]
-        if not running:
-            fail("稼働中のVMがありません")
-        selected = select_from_list(running, lambda v: v.name, title="稼働中のVM:")
-        vm_uuid = selected.uuid
-    elif is_uuid(target):
-        vm_uuid = target
-    else:
-        # 名前で検索
-        pid = resolve_project_id(project_id)
-        all_vms = list_vms(client, pid)
-        stop_active_spinner()
-        matched = [v for v in all_vms if v.name == target]
-        if not matched:
-            fail(f"VM '{target}' が見つかりません")
-        vm_uuid = matched[0].uuid
+    vm_uuid = _resolve_vm_uuid(client, target, project_id, running_only=True)
 
     # VM詳細からIPを取得
     vm = get_vm(client, vm_uuid)
@@ -1048,8 +1035,6 @@ def csv(
             fail(f"パターン '{target}' に一致するVMがありません")
     else:
         vms = all_vms
-
-    from mdx_cli.api.parallel import parallel_get
 
     token, base_url = get_auth_context()
     paths = [f"/api/vm/{v.uuid}/csv/" for v in vms]

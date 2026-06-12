@@ -4,10 +4,12 @@ import pytest
 import typer
 
 from mdx_cli.commands._common import (
+    find_by_uuid,
     is_uuid,
     prompt_int,
     resolve_project_id,
     select_from_list,
+    select_or_exit,
 )
 
 
@@ -132,6 +134,46 @@ def test_select_from_list_displays_formatted_items(mocker, capsys):
     out = capsys.readouterr().out
     assert "VM一覧:" in out
     assert "1) vm-a [PowerON]" in out
+
+
+# --- select_or_exit / find_by_uuid ---
+
+
+class _Item:
+    def __init__(self, uuid: str, name: str = ""):
+        self.uuid = uuid
+        self.name = name
+
+
+def test_select_or_exit_returns_selected_item(mocker):
+    """リストがあれば select_from_list で選択した要素を返す"""
+    mock_q = mocker.patch("mdx_cli.commands._common.questionary")
+    mock_q.text.return_value.unsafe_ask.return_value = "2"
+    items = [_Item("u-1"), _Item("u-2")]
+    result = select_or_exit(items, lambda i: i.uuid, title="一覧:", empty_message="ありません")
+    assert result.uuid == "u-2"
+
+
+def test_select_or_exit_empty_list_exits(capsys):
+    """空リストは黄色メッセージを表示して typer.Exit（正常終了）"""
+    with pytest.raises(typer.Exit) as exc_info:
+        select_or_exit([], lambda i: i.uuid, title="一覧:", empty_message="ACLルールがありません")
+    assert exc_info.value.exit_code == 0
+    assert "ACLルールがありません" in capsys.readouterr().out
+
+
+def test_find_by_uuid_returns_matched_item():
+    """uuid が一致する要素を返す"""
+    items = [_Item("u-1"), _Item("u-2")]
+    assert find_by_uuid(items, "u-2", label="ACL").uuid == "u-2"
+
+
+def test_find_by_uuid_not_found_fails(capsys):
+    """見つからなければエラー表示して終了コード1"""
+    with pytest.raises(typer.Exit) as exc_info:
+        find_by_uuid([_Item("u-1")], "u-x", label="ACL")
+    assert exc_info.value.exit_code == 1
+    assert "ACL u-x が見つかりません" in capsys.readouterr().out
 
 
 # --- get_client: 期限が近いトークンの事前リフレッシュ ---
