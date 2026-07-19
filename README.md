@@ -18,6 +18,20 @@ Web ポータル (oprpl.mdx.jp) の操作をコマンドラインから実行で
 uv tool install .
 ```
 
+## Skill としてインストール
+
+Codex / Claude Code の skill として使う場合:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aida0710/mdx-cli/main/install.sh | sh
+```
+
+ローカルのこのリポジトリから入れる場合:
+
+```bash
+sh install.sh --source . --codex-only
+```
+
 ### アップデート
 
 ```bash
