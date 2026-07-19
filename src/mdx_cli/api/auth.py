@@ -106,17 +106,9 @@ class MDXAuth(httpx.Auth):
         base_url = str(original_request.url.scheme) + "://" + str(original_request.url.host)
         if original_request.url.port and original_request.url.port not in (80, 443):
             base_url += f":{original_request.url.port}"
-        try:
-            with httpx.Client(base_url=base_url, timeout=30) as client:
-                resp = client.post("/api/refresh/", json={"token": self.token})
-                if resp.status_code == 200:
-                    return resp.json().get("token")
-        except httpx.HTTPError:
-            pass
-        return None
+        return refresh_saved_token(self.token or "", base_url)
 
     def _persist_token(self, token: str) -> None:
         if self._token_save_path:
-            import json
             self._token_save_path.parent.mkdir(parents=True, exist_ok=True)
             self._token_save_path.write_text(json.dumps({"token": token}))

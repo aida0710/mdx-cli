@@ -1,46 +1,47 @@
 from pathlib import Path
 
-import httpx
 import questionary
 from questionary import Choice
 import typer
-from rich.console import Console
 
 from mdx_cli.api.endpoints.networks import list_segments
-from mdx_cli.api.endpoints.tasks import wait_for_task
 from mdx_cli.api.endpoints.templates import list_templates
 from mdx_cli.api.endpoints.vms import (
     deploy_vm,
-    destroy_vm,
     get_vm,
-    get_vm_csv,
     list_vms,
-    power_off_vm,
-    power_on_vm,
-    reboot_vm,
     reconfigure_vm,
     rename_vm,
     reset_vm,
     shutdown_vm,
     sync_vms,
+    vm_action_path,
 )
-from mdx_cli.api.parallel import parallel_post, parallel_wait
-from mdx_cli.api.spinner import stop_active_spinner
-from mdx_cli.commands._common import get_client, ask_or_abort, resolve_project_id
-from mdx_cli.credentials.store import CredentialStore
+from mdx_cli.api.parallel import parallel_get, parallel_poll, parallel_post, parallel_wait
+from mdx_cli.api.spinner import progress_status, stop_active_spinner
+from mdx_cli.commands._common import (
+    fail,
+    get_auth_context,
+    get_client,
+    is_uuid,
+    prompt_int,
+    refresh_token_proactive,
+    resolve_project_id,
+    select_from_list,
+)
+from mdx_cli.commands._deploy_plan import DeployPlan
 from mdx_cli.commands._name_pattern import (
     expand_name_pattern,
     expand_name_pattern_for_deploy,
     match_names,
 )
-from mdx_cli.models.vm import VMDeployRequest
-from mdx_cli.output.formatting import render
+from mdx_cli.console import console
+from mdx_cli.models.pack import PACK_SPECS, pack_choice_label
+from mdx_cli.output.formatting import render, render_json
 from mdx_cli.output.tables import VM_COLUMNS
-from mdx_cli.settings import Settings
+from mdx_cli.settings import get_settings
 
 app = typer.Typer(no_args_is_help=True, help="仮想マシン管理")
-console = Console()
-
 
 
 @app.command("list")
@@ -55,6 +56,43 @@ def list_cmd(
     render(vms, VM_COLUMNS, json_mode=json)
 
 
+def _resolve_vm_uuid(
+    client,
+    target: str | None,
+    project_id: str | None,
+    running_only: bool = False,
+) -> str:
+    """VM指定（UUID / 名前 / 省略時は一覧から選択）を UUID に解決する。
+
+    running_only=True は一覧選択時のみ稼働中VMに絞る（名前・UUID指定はそのまま）。
+    """
+    if target and is_uuid(target):
+        return target
+
+    pid = resolve_project_id(project_id)
+    all_vms = list_vms(client, pid)
+    stop_active_spinner()
+
+    if target:
+        matched = [v for v in all_vms if v.name == target]
+        if not matched:
+            fail(f"VM '{target}' が見つかりません")
+        return matched[0].uuid
+
+    if running_only:
+        candidates = [v for v in all_vms if v.status == "PowerON"]
+        if not candidates:
+            fail("稼働中のVMがありません")
+        selected = select_from_list(candidates, lambda v: v.name, title="稼働中のVM:")
+    else:
+        if not all_vms:
+            fail("VMがありません")
+        selected = select_from_list(
+            all_vms, lambda v: f"{v.name} [{v.status}]", title="VM一覧:"
+        )
+    return selected.uuid
+
+
 @app.command()
 def show(
     target: str = typer.Argument(None, help="VM ID または名前（省略時は一覧から選択）"),
@@ -63,35 +101,10 @@ def show(
 ) -> None:
     """VM詳細"""
     client = get_client(silent=json)
-
-    # UUID指定
-    if target and len(target) == 36 and "-" in target:
-        vm = get_vm(client, target)
-    elif target:
-        # 名前で検索
-        pid = resolve_project_id(project_id)
-        all_vms = list_vms(client, pid)
-        stop_active_spinner()
-        matched = [v for v in all_vms if v.name == target]
-        if not matched:
-            console.print(f"[red]VM '{target}' が見つかりません[/red]")
-            raise typer.Exit(code=1)
-        vm = get_vm(client, matched[0].uuid)
-    else:
-        # 一覧から選択
-        pid = resolve_project_id(project_id)
-        all_vms = list_vms(client, pid)
-        stop_active_spinner()
-        console.print("\n[bold]VM一覧:[/bold]")
-        for i, v in enumerate(all_vms, 1):
-            console.print(f"  {i}) {v.name} [{v.status}]")
-        idx = int(questionary.text("\n番号を入力:").unsafe_ask()) - 1
-        vm = get_vm(client, all_vms[idx].uuid)
-
+    vm = get_vm(client, _resolve_vm_uuid(client, target, project_id))
     stop_active_spinner()
 
     if json:
-        from mdx_cli.output.formatting import render_json
         render_json(vm)
         return
 
@@ -105,20 +118,20 @@ def show(
     console.print(f"  CPU:            {extra.get('cpu', '-')}")
     console.print(f"  メモリ:         {extra.get('memory', '-')}")
     console.print(f"  GPU:            {extra.get('gpu', '-')}")
-    console.print(f"  パック:         {extra.get('pack_type', '-')} x {extra.get('pack_num', '-')}")
+    console.print(f"  パック:         {vm.pack_type or '-'} x {vm.pack_num if vm.pack_num is not None else '-'}")
     console.print(f"  NVLink:         {extra.get('nvlink', '-')}")
 
     # ディスク
-    disks = extra.get("hard_disks", [])
+    disks = vm.hard_disks
     if disks:
-        console.print(f"\n[bold]ディスク:[/bold]")
+        console.print("\n[bold]ディスク:[/bold]")
         for d in disks:
             console.print(f"  #{d.get('disk_number', '?')}: {d.get('capacity', '?')} ({d.get('datastore', '')})")
 
     # ネットワーク
-    nets = extra.get("service_networks", [])
+    nets = vm.service_networks
     if nets:
-        console.print(f"\n[bold]ネットワーク:[/bold]")
+        console.print("\n[bold]ネットワーク:[/bold]")
         for n in nets:
             ipv4 = ", ".join(n.get("ipv4_address", []))
             gip = n.get("global_ip", "")
@@ -130,9 +143,9 @@ def show(
                 console.print(f"    グローバルIP: {gip}")
 
     # ストレージネットワーク
-    snets = extra.get("storage_networks", [])
+    snets = vm.storage_networks
     if snets:
-        console.print(f"\n[bold]ストレージネットワーク:[/bold]")
+        console.print("\n[bold]ストレージネットワーク:[/bold]")
         for sn in snets:
             ipv4 = ", ".join(sn.get("ipv4_address", []))
             console.print(f"  アダプタ {sn.get('adapter_number', '?')}: {ipv4} ({sn.get('storage_network_type', '')})")
@@ -140,26 +153,34 @@ def show(
     # VMware Tools
     tools = extra.get("vmware_tools", {})
     if tools:
-        console.print(f"\n[bold]VMware Tools:[/bold]")
+        console.print("\n[bold]VMware Tools:[/bold]")
         console.print(f"  状態:     {tools.get('status', '-')}")
         console.print(f"  バージョン: {tools.get('version', '-')}")
 
     console.print()
 
 
-def _find_default_pubkey_path() -> str | None:
-    """~/.ssh から公開鍵パスを探す。"""
+def _list_pubkeys() -> list[Path]:
+    """~/.ssh にある公開鍵(.pub)の一覧を返す。標準的な鍵名を優先して並べる。"""
     ssh_dir = Path.home() / ".ssh"
-    # 標準的な鍵名を優先
-    for name in ["id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub"]:
-        path = ssh_dir / name
-        if path.exists():
-            return f"~/.ssh/{name}"
-    # なければ *.pub を探す
-    pubs = sorted(ssh_dir.glob("*.pub"))
-    if pubs:
-        return f"~/.ssh/{pubs[0].name}"
-    return None
+    if not ssh_dir.is_dir():
+        return []
+    priority = {"id_ed25519.pub": 0, "id_rsa.pub": 1, "id_ecdsa.pub": 2}
+    return sorted(
+        ssh_dir.glob("*.pub"),
+        key=lambda p: (priority.get(p.name, 99), p.name),
+    )
+
+
+def _pubkey_preview(path: Path) -> str:
+    """公開鍵ファイル内容のプレビュー（先頭30文字...末尾30文字）。"""
+    try:
+        content = path.read_text().strip()
+    except OSError:
+        return "(読み取り不可)"
+    if len(content) <= 63:
+        return content
+    return f"{content[:30]}...{content[-30:]}"
 
 
 @app.command()
@@ -184,65 +205,134 @@ def deploy(
     pid = resolve_project_id(project_id)
     client = get_client()
 
-    # --- テンプレート ---
+    selected_tmpl = _resolve_template(client, pid, template)
+    segment_uuid = _resolve_segment_for_deploy(client, pid, skip_prompt=yes)
+    shared_key = _resolve_ssh_key(key)
+    name_pattern = _resolve_name_pattern(name)
+    pack_type = _resolve_pack_type(pack_type_opt)
+    spec = PACK_SPECS[pack_type]
+
+    if pack_num_opt is not None:
+        if not 1 <= pack_num_opt <= spec.max_num:
+            fail(f"パック数は 1〜{spec.max_num} の範囲で指定してください")
+        pack_num = pack_num_opt
+    else:
+        pack_num = prompt_int(
+            f"パック数 (最大{spec.max_num}):",
+            max_val=spec.max_num,
+            default=str(spec.default_num),
+        )
+
+    if disk is not None:
+        disk_size = disk
+    else:
+        disk_size = prompt_int(
+            "ディスクサイズ(GB):", default=str(selected_tmpl.lower_limit_disk)
+        )
+
+    service_level = _resolve_service_level(service_level_opt)
+
+    if not power_on and not yes:
+        power_on = questionary.confirm("デプロイ後に自動起動しますか？", default=False).unsafe_ask()
+
+    plan = DeployPlan(
+        template=selected_tmpl,
+        segment_uuid=segment_uuid,
+        name_pattern=name_pattern,
+        disk_size=disk_size,
+        pack_type=pack_type,
+        pack_num=pack_num,
+        service_level=service_level,
+        shared_key=shared_key,
+        power_on=power_on,
+    )
+
+    _print_deploy_summary(plan)
+    if not yes:
+        if not questionary.confirm("\nデプロイしますか？").unsafe_ask():
+            raise typer.Abort()
+
+    _execute_deploy(client, plan, pid, no_wait=no_wait)
+
+
+def _resolve_template(client, pid: str, template: str | None):
+    """テンプレートを解決する。指定があれば部分一致、なければ一覧から選択。"""
     templates = list_templates(client, pid)
     stop_active_spinner()
 
     if template:
         matched = [t for t in templates if template.lower() in t.name.lower()]
         if not matched:
-            console.print(f"[red]テンプレート '{template}' が見つかりません[/red]")
-            raise typer.Exit(code=1)
-        selected_tmpl = matched[0]
-    else:
-        console.print("\n[bold]テンプレート:[/bold]")
-        for i, t in enumerate(templates, 1):
-            os_info = f" [cyan]{t.os_name or ''} {t.os_version or ''}[/cyan]" if t.os_name else ""
-            gpu = " [red]GPU必須[/red]" if t.gpu_required else ""
-            disk_info = f" [dim]disk≥{t.lower_limit_disk}GB[/dim]"
-            console.print(f"  {i}) {t.name}{os_info}{gpu}{disk_info}")
-            if t.description:
-                console.print(f"     [dim]{t.description}[/dim]")
-        tmpl_idx = int(questionary.text("\n番号を入力:").unsafe_ask()) - 1
-        selected_tmpl = templates[tmpl_idx]
+            fail(f"テンプレート '{template}' が見つかりません")
+        return matched[0]
 
-    # --- セグメント ---
+    if not templates:
+        fail("テンプレートがありません")
+
+    def _format(t) -> str:
+        os_info = f" [cyan]{t.os_name or ''} {t.os_version or ''}[/cyan]" if t.os_name else ""
+        gpu = " [red]GPU必須[/red]" if t.gpu_required else ""
+        line = f"{t.name}{os_info}{gpu} [dim]disk≥{t.lower_limit_disk}GB[/dim]"
+        if t.description:
+            line += f"\n     [dim]{t.description}[/dim]"
+        return line
+
+    return select_from_list(templates, _format, title="テンプレート:")
+
+
+def _resolve_segment_for_deploy(client, pid: str, skip_prompt: bool) -> str:
+    """デプロイ先セグメントを解決する。複数あれば選択（-y 時は先頭）。"""
     segments = list_segments(client, pid)
     stop_active_spinner()
-    selected_seg = segments[0]
-    if len(segments) > 1 and not yes:
-        console.print("\n[bold]セグメント:[/bold]")
-        for i, s in enumerate(segments, 1):
-            console.print(f"  {i}) {s.name}")
-        seg_idx = int(questionary.text("番号を入力:").unsafe_ask()) - 1
-        selected_seg = segments[seg_idx]
+    if not segments:
+        fail("セグメントがありません")
+    if len(segments) == 1 or skip_prompt:
+        return segments[0].uuid
+    return select_from_list(segments, lambda s: s.name, title="セグメント:").uuid
 
-    # --- SSH公開鍵 ---
+
+def _resolve_ssh_key(key: str | None) -> str:
+    """SSH公開鍵の内容を解決する。未指定なら ~/.ssh の一覧から選択。"""
     if key:
         key_path = Path(key).expanduser()
     else:
-        default_path = _find_default_pubkey_path() or ""
         console.print("\n[bold]SSH公開鍵[/bold]")
-        console.print("[dim]  絶対パスまたは ~/... で指定。デフォルトは ~/.ssh/ から自動検出[/dim]")
-        key_path_input = questionary.text("パス:", default=default_path).unsafe_ask()
-        key_path = Path(key_path_input).expanduser()
+        pubkeys = _list_pubkeys()
+        if pubkeys:
+            console.print("[dim]  ~/.ssh/ にある公開鍵:[/dim]")
+            for i, p in enumerate(pubkeys, 1):
+                console.print(f"  {i}) {p.name}")
+                console.print(f"     [grey50]{_pubkey_preview(p)}[/grey50]")
+            console.print("[dim]  番号で選択、または絶対パス/~/... を直接入力[/dim]")
+            answer = questionary.text("番号またはパス:", default="1").unsafe_ask()
+            if answer.strip().isdigit() and 1 <= int(answer) <= len(pubkeys):
+                key_path = pubkeys[int(answer) - 1]
+                console.print(f"[green]{key_path.name} が選択されました[/green]")
+            else:
+                key_path = Path(answer).expanduser()
+        else:
+            console.print("[yellow]  警告: ~/.ssh/ に .pub ファイルが見つかりません[/yellow]")
+            console.print("[dim]  絶対パスまたは ~/... で公開鍵のパスを指定してください[/dim]")
+            answer = questionary.text("パス:").unsafe_ask()
+            key_path = Path(answer).expanduser()
     if not key_path.is_absolute():
-        console.print("[red]絶対パスまたは ~/... で指定してください[/red]")
-        raise typer.Exit(code=1)
+        fail("絶対パスまたは ~/... で指定してください")
     if not key_path.exists():
-        console.print(f"[red]ファイルが見つかりません: {key_path}[/red]")
-        raise typer.Exit(code=1)
-    shared_key = key_path.read_text().strip()
+        fail(f"ファイルが見つかりません: {key_path}")
+    return key_path.read_text().strip()
 
-    # --- VM名 ---
+
+def _resolve_name_pattern(name: str | None) -> str:
+    """VM名パターンを解決し、複数台のときは展開結果の概要を表示する。"""
     if name:
-        vm_name_pattern = name
+        pattern = name
     else:
         console.print("\n[bold]VM名[/bold]")
         console.print("[dim]  パターンで一括作成: my-vm-{0-9} → 10台 (1リクエスト), name-{a-c}-{0-9} → 30台 (3リクエスト)[/dim]")
-        vm_name_pattern = questionary.text("VM名:").unsafe_ask()
-    vm_names = expand_name_pattern(vm_name_pattern)
-    deploy_patterns = expand_name_pattern_for_deploy(vm_name_pattern)
+        pattern = questionary.text("VM名:").unsafe_ask()
+
+    vm_names = expand_name_pattern(pattern)
+    deploy_patterns = expand_name_pattern_for_deploy(pattern)
     if len(vm_names) > 1:
         if len(deploy_patterns) < len(vm_names):
             console.print(
@@ -251,104 +341,65 @@ def deploy(
             )
         else:
             console.print(f"  → {len(vm_names)}台: {vm_names[0]} 〜 {vm_names[-1]}")
+    return pattern
 
-    # --- パックタイプ ---
+
+def _resolve_pack_type(pack_type_opt: str | None) -> str:
     if pack_type_opt:
-        pack_type = pack_type_opt
-    else:
-        pack_type = questionary.select(
-            "パックタイプ:",
-            choices=[
-                Choice("cpu（1パック = 1コア / 1.51GB RAM）", value="cpu"),
-                Choice("gpu（1パック = 18コア / 1GPU / 57.6GB RAM / 40GB VRAM）", value="gpu"),
-            ],
-        ).unsafe_ask()
+        if pack_type_opt not in PACK_SPECS:
+            fail(f"不明なパックタイプです: {pack_type_opt}（cpu / gpu）")
+        return pack_type_opt
+    return questionary.select(
+        "パックタイプ:",
+        choices=[Choice(pack_choice_label(pt), value=pt) for pt in PACK_SPECS],
+    ).unsafe_ask()
 
-    max_pack = 152 if pack_type == "cpu" else 8
-    mem_per_pack = 1.51 if pack_type == "cpu" else 57.60
 
-    # --- パック数 ---
-    if pack_num_opt is not None:
-        pack_num = pack_num_opt
-    else:
-        default_pack = "3" if pack_type == "cpu" else "1"
-        pack_num = int(questionary.text(f"パック数 (最大{max_pack}):", default=default_pack).unsafe_ask())
-
-    # --- ディスク ---
-    if disk is not None:
-        disk_size = disk
-    else:
-        disk_size = int(questionary.text("ディスクサイズ(GB):", default=str(selected_tmpl.lower_limit_disk)).unsafe_ask())
-
-    # --- サービスレベル ---
+def _resolve_service_level(service_level_opt: str | None) -> str:
     if service_level_opt:
-        service_level = service_level_opt
-    else:
-        service_level = questionary.select(
-            "サービスレベル:",
-            choices=[
-                Choice("spot（低価格・中断あり）", value="spot"),
-                Choice("guarantee（高価格・中断なし）", value="guarantee"),
-            ],
-        ).unsafe_ask()
+        return service_level_opt
+    return questionary.select(
+        "サービスレベル:",
+        choices=[
+            Choice("spot（低価格・中断あり）", value="spot"),
+            Choice("guarantee（高価格・中断なし）", value="guarantee"),
+        ],
+    ).unsafe_ask()
 
-    # --- 自動起動 ---
-    if not power_on and not yes:
-        power_on = questionary.confirm("デプロイ後に自動起動しますか？", default=False).unsafe_ask()
 
-    # --- 確認 ---
-    total_mem = pack_num * mem_per_pack
-    console.print(f"\n[bold]デプロイ内容:[/bold]")
-    console.print(f"  テンプレート: {selected_tmpl.name}")
-    console.print(f"  ディスク:     {disk_size}GB / {pack_type} x {pack_num} / {service_level}")
-    console.print(f"  自動起動:     {'あり' if power_on else 'なし'}")
+def _print_deploy_summary(plan: DeployPlan) -> None:
+    vm_names = plan.vm_names
+    console.print("\n[bold]デプロイ内容:[/bold]")
+    console.print(f"  テンプレート: {plan.template.name}")
+    console.print(f"  ディスク:     {plan.disk_size}GB / {plan.pack_type} x {plan.pack_num} / {plan.service_level}")
+    console.print(f"  自動起動:     {'あり' if plan.power_on else 'なし'}")
     if len(vm_names) == 1:
         console.print(f"  VM名:         {vm_names[0]}")
     else:
         console.print(f"  VM数:         {len(vm_names)}台 ({vm_names[0]} 〜 {vm_names[-1]})")
 
-    if not yes:
-        if not questionary.confirm("\nデプロイしますか？").unsafe_ask():
-            raise typer.Abort()
 
-    # --- デプロイ実行（直列、API範囲記法でリクエスト集約） ---
+def _execute_deploy(client, plan: DeployPlan, pid: str, no_wait: bool) -> None:
+    """デプロイ実行（直列、API範囲記法でリクエスト集約）。"""
+    requests = plan.to_requests(pid)
     task_ids: list[str] = []
-    for i, pattern in enumerate(deploy_patterns, 1):
-        req = VMDeployRequest(
-            catalog=selected_tmpl.uuid,
-            project=pid,
-            vm_name=pattern,
-            disk_size=disk_size,
-            pack_type=pack_type,
-            pack_num=pack_num,
-            service_level=service_level,
-            network_adapters=[{"adapter_number": 1, "segment": selected_seg.uuid}],
-            shared_key=shared_key,
-            template_name=selected_tmpl.template_name or selected_tmpl.name,
-            os_type=selected_tmpl.os_type or "Linux",
-            power_on=power_on,
-        )
+    for i, req in enumerate(requests, 1):
         resp = deploy_vm(client, req)
         task_ids.extend(resp.task_id)
         stop_active_spinner()
         if len(resp.task_id) > 1:
             console.print(
-                f"  [green]✓[/green] ({i}/{len(deploy_patterns)}) {pattern} → {len(resp.task_id)}台分のタスクID"
+                f"  [green]✓[/green] ({i}/{len(requests)}) {req.vm_name} → {len(resp.task_id)}台分のタスクID"
             )
         else:
             console.print(
-                f"  [green]✓[/green] ({i}/{len(deploy_patterns)}) {pattern} → タスク: {resp.task_id[0]}"
+                f"  [green]✓[/green] ({i}/{len(requests)}) {req.vm_name} → タスク: {resp.task_id[0]}"
             )
 
     console.print(f"\n{len(task_ids)}台のデプロイを開始しました")
 
     if not no_wait and task_ids:
-        task_results = _parallel_task_wait(task_ids)
-        for data in task_results:
-            obj_name = data.get("object_name", "?")
-            status = data.get("status", "?")
-            style = "[green]" if status == "Completed" else "[red]"
-            console.print(f"  {style}{obj_name}: {status}[/]")
+        _print_task_results(_parallel_task_wait(task_ids))
 
 
 def _resolve_vms(client, pattern: str, project_id: str | None) -> list:
@@ -356,8 +407,7 @@ def _resolve_vms(client, pattern: str, project_id: str | None) -> list:
 
     UUIDならそのまま、名前パターンならVM一覧から検索。
     """
-    # UUIDっぽければ直接返す
-    if len(pattern) == 36 and "-" in pattern:
+    if is_uuid(pattern):
         vm = get_vm(client, pattern)
         stop_active_spinner()
         return [vm]
@@ -370,36 +420,9 @@ def _resolve_vms(client, pattern: str, project_id: str | None) -> list:
     matched_names = match_names(pattern, all_names)
 
     if not matched_names:
-        console.print(f"[red]パターン '{pattern}' に一致するVMがありません[/red]")
-        raise typer.Exit(code=1)
+        fail(f"パターン '{pattern}' に一致するVMがありません")
 
     return [v for v in all_vms if v.name in set(matched_names)]
-
-
-def _get_token_and_base() -> tuple[str, str]:
-    """並列API用にトークンとベースURLを取得する。"""
-    settings = Settings()
-    store = CredentialStore(config_dir=settings.config_dir)
-    return store.load_token() or "", settings.base_url
-
-
-def _refresh_token_proactive() -> None:
-    """バルク操作前にトークンを無条件リフレッシュして保存する。
-
-    parallel_post は MDXAuth を経由しないため、チャンクごとに新鮮なトークンを
-    取得しておく。失敗時は既存トークンで続行。
-    """
-    from mdx_cli.api.auth import refresh_saved_token
-
-    settings = Settings()
-    store = CredentialStore(config_dir=settings.config_dir)
-    token = store.load_token()
-    if not token:
-        return
-
-    new_token = refresh_saved_token(token, settings.base_url)
-    if new_token:
-        store.save_token(new_token)
 
 
 _CHUNK_SIZE = 30
@@ -411,31 +434,19 @@ def _fetch_vm_details(client, vms_brief: list) -> list:
     単一の場合は渡されたクライアントで同期取得。
     複数の場合は parallel_get で並列化し、完了ごとにVM名を進捗表示する。
     """
-    from mdx_cli.api.spinner import _console as spin_console
-    from mdx_cli.api.parallel import parallel_get
     from mdx_cli.models.vm import VM
-    from rich.status import Status
 
     if len(vms_brief) == 1:
         return [get_vm(client, vms_brief[0].uuid)]
 
-    token, base_url = _get_token_and_base()
-    total = len(vms_brief)
-    status_display = Status("", console=spin_console, spinner="dots")
-    status_display.start()
-    done_count = 0
-
-    def on_progress(idx: int) -> None:
-        nonlocal done_count
-        done_count += 1
-        name = vms_brief[idx].name
-        status_display.update(f"詳細取得中... ({done_count}/{total}) {name}")
-
+    token, base_url = get_auth_context()
     paths = [f"/api/vm/{v.uuid}/" for v in vms_brief]
-    results = parallel_get(
-        base_url, token, paths, on_progress=on_progress, return_exceptions=True
-    )
-    status_display.stop()
+    with progress_status("詳細取得中", len(vms_brief)) as progress:
+        results = parallel_get(
+            base_url, token, paths,
+            on_progress=lambda idx: progress.advance(vms_brief[idx].name),
+            return_exceptions=True,
+        )
 
     vms_detail = []
     missing = []
@@ -457,54 +468,50 @@ def _fetch_vm_details(client, vms_brief: list) -> list:
     return vms_detail
 
 
-def _wait_for_poweroff(running_vms: list, poll_interval: int = 5, max_polls: int = 60) -> None:
-    """指定VMが全て PowerOFF になるまで並列ポーリングする（進捗表示付き）。"""
-    import asyncio
-    from mdx_cli.api.spinner import _console as spin_console
-    from rich.status import Status
+def _wait_for_poweroff(running_vms: list, poll_interval: int = 5, max_polls: int = 60) -> list:
+    """指定VMが全て PowerOFF になるまで並列ポーリングする（進捗表示付き）。
 
-    token, base_url = _get_token_and_base()
-    settings = Settings()
-    resolved = base_url if base_url.endswith("/") else base_url + "/"
-    total = len(running_vms)
+    戻り値: タイムアウト（poll_interval × max_polls）までに停止を
+    確認できなかったVMのリスト。空なら全台停止。
+    """
+    token, base_url = get_auth_context()
 
-    status_display = Status("", console=spin_console, spinner="dots")
-    status_display.start()
-    done_count = 0
-    last_done_name = ""
-    status_display.update(f"停止待機中... (0/{total})")
+    with progress_status("停止待機中", len(running_vms)) as progress:
+        results = parallel_poll(
+            base_url,
+            token,
+            [f"/api/vm/{v.uuid}/" for v in running_vms],
+            is_done=lambda data: data.get("status") != "PowerON",
+            poll_interval=poll_interval,
+            max_polls=max_polls,
+            max_concurrent=8,  # VM詳細APIは遅いため低並列に抑える
+            on_done=lambda i: progress.advance(f"完了: {running_vms[i].name}"),
+        )
 
-    def update_display() -> None:
-        if last_done_name:
-            status_display.update(
-                f"停止待機中... ({done_count}/{total}) 完了: {last_done_name}"
-            )
-        else:
-            status_display.update(f"停止待機中... ({done_count}/{total})")
+    return [v for v, done in zip(running_vms, results) if not done]
 
-    async def _run():
-        nonlocal done_count, last_done_name
-        async with httpx.AsyncClient(
-            base_url=resolved,
-            timeout=settings.request_timeout,
-            headers={"Authorization": f"JWT {token}"},
-        ) as ac:
-            async def _poll(vm):
-                nonlocal done_count, last_done_name
-                for _ in range(max_polls):
-                    resp = await ac.get(f"/api/vm/{vm.uuid}/")
-                    if resp.json().get("status") != "PowerON":
-                        done_count += 1
-                        last_done_name = vm.name
-                        update_display()
-                        return
-                    await asyncio.sleep(poll_interval)
-            await asyncio.gather(*[_poll(v) for v in running_vms])
 
-    try:
-        asyncio.run(_run())
-    finally:
-        status_display.stop()
+def _ensure_stopped(running_vms: list) -> None:
+    """VMの停止完了を待ち、確認できなかったVMがあれば警告して続行確認する。
+
+    稼働中VMへの destroy / reconfigure はAPI側で失敗するため、
+    黙って先へ進まず default=False で確認を挟む。
+    """
+    still_running = _wait_for_poweroff(running_vms)
+    if not still_running:
+        console.print("  → 停止完了")
+        return
+
+    console.print(
+        f"\n[yellow]⚠ {len(still_running)}台の停止をタイムアウトまでに確認できませんでした:[/yellow]"
+    )
+    for v in still_running:
+        console.print(f"  {v.name} [dim]({v.uuid})[/dim]")
+    if not questionary.confirm(
+        "このまま続行しますか？（稼働中のVMは操作に失敗する可能性があります）",
+        default=False,
+    ).unsafe_ask():
+        raise typer.Abort()
 
 
 def _check_reconfigure_homogeneity(vms: list) -> None:
@@ -512,23 +519,13 @@ def _check_reconfigure_homogeneity(vms: list) -> None:
 
     不一致の場合はエラー表示してtyper.Exitを送出する。
     """
-    pack_types = set()
-    disk_counts = set()
-    for v in vms:
-        extra = getattr(v, "model_extra", {}) or {}
-        pack_types.add(extra.get("pack_type"))
-        disk_counts.add(len(extra.get("hard_disks", [])))
+    pack_types = {v.pack_type for v in vms}
+    disk_counts = {len(v.hard_disks) for v in vms}
 
     if len(pack_types) > 1:
-        console.print(
-            f"[red]pack_type が混在しているため一括構成変更できません: {pack_types}[/red]"
-        )
-        raise typer.Exit(code=1)
+        fail(f"pack_type が混在しているため一括構成変更できません: {pack_types}")
     if len(disk_counts) > 1:
-        console.print(
-            f"[red]ディスク本数が混在しているため一括構成変更できません: {disk_counts}[/red]"
-        )
-        raise typer.Exit(code=1)
+        fail(f"ディスク本数が混在しているため一括構成変更できません: {disk_counts}")
 
 
 def _build_rename_plan(
@@ -576,181 +573,172 @@ def _parallel_vm_action(vms: list, action_path_fn, action_name: str, json_fn=Non
     30台ごとにトークンを事前リフレッシュしてから並列POSTする。
     長時間のバルク操作でもトークンが途中で切れない。
     """
-    from mdx_cli.api.spinner import _console as spin_console
-    from rich.status import Status
-
-    status_display = Status("", console=spin_console, spinner="dots")
-    status_display.start()
-    done_count = 0
-    total = len(vms)
-
     all_results: list[dict] = []
-    for chunk_start in range(0, total, _CHUNK_SIZE):
-        chunk = vms[chunk_start:chunk_start + _CHUNK_SIZE]
-        _refresh_token_proactive()
-        token, base_url = _get_token_and_base()
-        reqs = [{"path": action_path_fn(v), "json": json_fn(v) if json_fn else None} for v in chunk]
-
-        def on_progress(idx: int, _chunk=chunk) -> None:
-            nonlocal done_count
-            done_count += 1
-            name = _chunk[idx].name
-            status_display.update(f"{action_name}... ({done_count}/{total}) {name}")
-
-        results = parallel_post(base_url, token, reqs, on_progress=on_progress)
-        all_results.extend(results)
-
-    status_display.stop()
+    with progress_status(action_name, len(vms)) as progress:
+        for chunk_start in range(0, len(vms), _CHUNK_SIZE):
+            chunk = vms[chunk_start:chunk_start + _CHUNK_SIZE]
+            refresh_token_proactive()
+            token, base_url = get_auth_context()
+            reqs = [{"path": action_path_fn(v), "json": json_fn(v) if json_fn else None} for v in chunk]
+            results = parallel_post(
+                base_url, token, reqs,
+                on_progress=lambda idx, _chunk=chunk: progress.advance(_chunk[idx].name),
+            )
+            all_results.extend(results)
     return all_results
+
+
+def _print_task_results(task_results: list[dict]) -> None:
+    """タスク完了結果を Completed=緑 / それ以外=赤 で一覧表示する。"""
+    for data in task_results:
+        name = data.get("object_name", "?")
+        status = data.get("status", "?")
+        style = "[green]" if status == "Completed" else "[red]"
+        console.print(f"  {style}{name}: {status}[/]")
 
 
 def _parallel_task_wait(task_ids: list[str]) -> list[dict]:
     """複数タスクを並列ポーリングで待機する。"""
-    from mdx_cli.api.spinner import _console as spin_console
-    from rich.status import Status
+    token, base_url = get_auth_context()
+    settings = get_settings()
 
-    token, base_url = _get_token_and_base()
-    settings = Settings()
-
-    status_display = Status("", console=spin_console, spinner="dots")
-    status_display.start()
-    done_count = 0
-
-    def on_done(tid: str, data: dict) -> None:
-        nonlocal done_count
-        done_count += 1
+    def on_done(tid: str, data: dict, progress) -> None:
         name = data.get("object_name", tid[:8])
         status = data.get("status", "?")
-        status_display.update(f"タスク完了待ち... ({done_count}/{len(task_ids)}) {name}: {status}")
+        progress.advance(f"{name}: {status}")
 
-    results = parallel_wait(
-        base_url, token, task_ids,
-        poll_interval=settings.task_poll_interval,
-        timeout=settings.task_poll_timeout,
-        on_done=on_done,
-    )
-    status_display.stop()
+    with progress_status("タスク完了待ち", len(task_ids)) as progress:
+        results = parallel_wait(
+            base_url, token, task_ids,
+            poll_interval=settings.task_poll_interval,
+            timeout=settings.task_poll_timeout,
+            on_done=lambda tid, data: on_done(tid, data, progress),
+        )
     return results
+
+
+_TARGET_HELP = "VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"
+
+
+def _bulk_power_action(
+    target: str,
+    project_id: str | None,
+    *,
+    action: str,
+    header_verb: str,
+    progress_label: str,
+    final_verb: str,
+    note: str = "",
+    danger: bool = False,
+    body_fn=None,
+) -> None:
+    """電源系コマンド共通フロー: 対象解決 → 一覧表示 → 確認 → 並列実行。
+
+    danger=True は対象が1台でも default=False で確認する（reset 等）。
+    それ以外は複数台のときのみ確認する。
+    """
+    client = get_client()
+    vms = _resolve_vms(client, target, project_id)
+
+    style = "bold red" if danger else "bold"
+    console.print(f"\n[{style}]{len(vms)}台を{header_verb}します{note}:[/{style}]")
+    for v in vms:
+        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
+
+    if danger:
+        if not questionary.confirm(
+            f"\n本当に{len(vms)}台を{header_verb}しますか？", default=False
+        ).unsafe_ask():
+            raise typer.Abort()
+    elif len(vms) > 1:
+        if not questionary.confirm(f"\n{len(vms)}台を{header_verb}しますか？").unsafe_ask():
+            raise typer.Abort()
+
+    _parallel_vm_action(
+        vms, lambda v: vm_action_path(v.uuid, action), progress_label, json_fn=body_fn
+    )
+    for v in vms:
+        console.print(f"  [green]✓[/green] {v.name}")
+    console.print(f"\n{len(vms)}台の{final_verb}を実行しました")
 
 
 @app.command()
 def start(
-    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
+    target: str = typer.Argument(help=_TARGET_HELP),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
     service_level: str = typer.Option("spot", "--service-level", "-s", help="サービスレベル"),
 ) -> None:
     """VM起動（パターンで複数台対応）"""
-    client = get_client()
-    vms = _resolve_vms(client, target, project_id)
-
-    console.print(f"\n[bold]{len(vms)}台を起動します（{service_level}）:[/bold]")
-    for v in vms:
-        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
-
-    if len(vms) > 1:
-        if not questionary.confirm(f"\n{len(vms)}台を起動しますか？").unsafe_ask():
-            raise typer.Abort()
-
-    _parallel_vm_action(
-        vms,
-        lambda v: f"/api/vm/{v.uuid}/power_on/",
-        "起動中",
-        json_fn=lambda v: {"service_level": service_level},
+    _bulk_power_action(
+        target, project_id,
+        action="power_on",
+        header_verb="起動",
+        progress_label="起動中",
+        final_verb="起動",
+        note=f"（{service_level}）",
+        body_fn=lambda v: {"service_level": service_level},
     )
-    for v in vms:
-        console.print(f"  [green]✓[/green] {v.name}")
-    console.print(f"\n{len(vms)}台の起動を実行しました")
 
 
 @app.command()
 def stop(
-    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
+    target: str = typer.Argument(help=_TARGET_HELP),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
 ) -> None:
     """VM強制停止（パターンで複数台対応）。正常停止は shutdown を使用"""
-    client = get_client()
-    vms = _resolve_vms(client, target, project_id)
-
-    console.print(f"\n[bold]{len(vms)}台を停止します:[/bold]")
-    for v in vms:
-        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
-
-    if len(vms) > 1:
-        if not questionary.confirm(f"\n{len(vms)}台を停止しますか？").unsafe_ask():
-            raise typer.Abort()
-
-    _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/power_off/", "強制停止中")
-    for v in vms:
-        console.print(f"  [green]✓[/green] {v.name}")
-    console.print(f"\n{len(vms)}台の強制停止を実行しました")
+    _bulk_power_action(
+        target, project_id,
+        action="power_off",
+        header_verb="停止",
+        progress_label="強制停止中",
+        final_verb="強制停止",
+    )
 
 
 @app.command()
 def shutdown(
-    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
+    target: str = typer.Argument(help=_TARGET_HELP),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
 ) -> None:
     """VM正常シャットダウン（パターンで複数台対応）"""
-    client = get_client()
-    vms = _resolve_vms(client, target, project_id)
-
-    console.print(f"\n[bold]{len(vms)}台をシャットダウンします:[/bold]")
-    for v in vms:
-        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
-
-    if len(vms) > 1:
-        if not questionary.confirm(f"\n{len(vms)}台をシャットダウンしますか？").unsafe_ask():
-            raise typer.Abort()
-
-    _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/shutdown/", "シャットダウン中")
-    for v in vms:
-        console.print(f"  [green]✓[/green] {v.name}")
-    console.print(f"\n{len(vms)}台のシャットダウンを実行しました")
+    _bulk_power_action(
+        target, project_id,
+        action="shutdown",
+        header_verb="シャットダウン",
+        progress_label="シャットダウン中",
+        final_verb="シャットダウン",
+    )
 
 
 @app.command()
 def reboot(
-    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
+    target: str = typer.Argument(help=_TARGET_HELP),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
 ) -> None:
     """VM再起動（パターンで複数台対応）"""
-    client = get_client()
-    vms = _resolve_vms(client, target, project_id)
-
-    console.print(f"\n[bold]{len(vms)}台を再起動します:[/bold]")
-    for v in vms:
-        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
-
-    if len(vms) > 1:
-        if not questionary.confirm(f"\n{len(vms)}台を再起動しますか？").unsafe_ask():
-            raise typer.Abort()
-
-    _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/reboot/", "再起動中")
-    for v in vms:
-        console.print(f"  [green]✓[/green] {v.name}")
-    console.print(f"\n{len(vms)}台の再起動を実行しました")
+    _bulk_power_action(
+        target, project_id,
+        action="reboot",
+        header_verb="再起動",
+        progress_label="再起動中",
+        final_verb="再起動",
+    )
 
 
 @app.command()
 def reset(
-    target: str = typer.Argument(help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須)"),
+    target: str = typer.Argument(help=_TARGET_HELP),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
 ) -> None:
     """VMリセット（パターンで複数台対応）"""
-    client = get_client()
-    vms = _resolve_vms(client, target, project_id)
-
-    console.print(f"\n[bold red]{len(vms)}台をリセットします:[/bold red]")
-    for v in vms:
-        console.print(f"  {v.name} [dim]({v.uuid})[/dim] [{v.status}]")
-
-    if not questionary.confirm(f"\n本当に{len(vms)}台をリセットしますか？", default=False).unsafe_ask():
-        raise typer.Abort()
-
-    _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/reset/", "リセット中")
-    for v in vms:
-        console.print(f"  [green]✓[/green] {v.name}")
-    console.print(f"\n{len(vms)}台のリセットを実行しました")
+    _bulk_power_action(
+        target, project_id,
+        action="reset",
+        header_verb="リセット",
+        progress_label="リセット中",
+        final_verb="リセット",
+        danger=True,
+    )
 
 
 @app.command()
@@ -867,11 +855,12 @@ def reconfigure(
     if not target:
         all_vms = list_vms(client, pid)
         stop_active_spinner()
-        console.print("\n[bold]VM一覧:[/bold]")
-        for i, v in enumerate(all_vms, 1):
-            console.print(f"  {i}) {v.name} [{v.status}]")
-        idx = int(questionary.text("\n番号を入力:").unsafe_ask()) - 1
-        vms_brief = [all_vms[idx]]
+        if not all_vms:
+            fail("VMがありません")
+        selected = select_from_list(
+            all_vms, lambda v: f"{v.name} [{v.status}]", title="VM一覧:"
+        )
+        vms_brief = [selected]
     else:
         vms_brief = _resolve_vms(client, target, project_id)
 
@@ -880,8 +869,7 @@ def reconfigure(
     stop_active_spinner()
 
     if not vms_detail:
-        console.print("[red]構成変更可能なVMがありません（詳細取得が全て失敗しました）[/red]")
-        raise typer.Exit(code=1)
+        fail("構成変更可能なVMがありません（詳細取得が全て失敗しました）")
 
     # 複数台なら均質性チェック
     if len(vms_detail) > 1:
@@ -900,10 +888,10 @@ def reconfigure(
         console.print(f"\n[bold]{ref.name}[/bold] の現在の構成:")
 
     console.print(f"  状態:     {ref.status}")
-    console.print(f"  パック:   {ref_extra.get('pack_type', 'cpu')} x {ref_extra.get('pack_num', '?')}")
+    console.print(f"  パック:   {ref.pack_type or 'cpu'} x {ref.pack_num if ref.pack_num is not None else '?'}")
     console.print(f"  CPU:      {ref_extra.get('cpu', '?')}")
     console.print(f"  メモリ:   {ref_extra.get('memory', '?')}")
-    ref_disks = ref_extra.get("hard_disks", [])
+    ref_disks = ref.hard_disks
     for d in ref_disks:
         console.print(f"  ディスク: #{d.get('disk_number', '?')}: {d.get('capacity', '?')}")
 
@@ -916,35 +904,24 @@ def reconfigure(
         if not questionary.confirm("停止して構成変更しますか？").unsafe_ask():
             raise typer.Abort()
         _parallel_vm_action(
-            running_vms, lambda v: f"/api/vm/{v.uuid}/shutdown/", "シャットダウン中"
+            running_vms, lambda v: vm_action_path(v.uuid, "shutdown"), "シャットダウン中"
         )
-        _wait_for_poweroff(running_vms)
-        console.print(f"  → 停止完了")
+        _ensure_stopped(running_vms)
 
     # 新しい構成を入力
-    console.print(f"\n[bold]新しい構成（Enterで変更なし）:[/bold]")
+    console.print("\n[bold]新しい構成（Enterで変更なし）:[/bold]")
 
-    pack_type = ref_extra.get("pack_type", "cpu")
-    current_pack_num = ref_extra.get("pack_num", 3)
-    if pack_type == "cpu":
-        max_pack = 152
-        mem_per_pack = 1.51
-    else:
-        max_pack = 8
-        mem_per_pack = 57.60
+    pack_type = ref.pack_type or "cpu"
+    current_pack_num = ref.pack_num if ref.pack_num is not None else 3
+    spec = PACK_SPECS.get(pack_type, PACK_SPECS["cpu"])
 
-    new_pack_num = int(questionary.text(
-        f"パック数 ({pack_type}, 最大{max_pack}):",
+    new_pack_num = prompt_int(
+        f"パック数 ({pack_type}, 最大{spec.max_num}):",
+        max_val=spec.max_num,
         default=str(current_pack_num),
-    ).unsafe_ask())
+    )
 
-    new_total_mem = new_pack_num * mem_per_pack
-    if pack_type == "cpu":
-        console.print(f"  → [cyan]{new_pack_num}コア / {new_total_mem:.1f}GB RAM[/cyan]")
-    else:
-        console.print(
-            f"  → [cyan]{new_pack_num * 18}コア / {new_pack_num}GPU / {new_total_mem:.1f}GB RAM[/cyan]"
-        )
+    console.print(f"  → [cyan]{spec.resource_summary(new_pack_num)}[/cyan]")
 
     # ディスク新容量（代表VMの各ディスク分を聞き、全VMに同一適用）
     new_capacities: list[int] = []
@@ -954,14 +931,14 @@ def reconfigure(
             current_cap_int = int(float(current_cap))
         except (ValueError, TypeError):
             current_cap_int = 40
-        new_cap = int(questionary.text(
+        new_cap = prompt_int(
             f"ディスク #{d.get('disk_number', '?')} (GB):",
             default=str(current_cap_int),
-        ).unsafe_ask())
+        )
         new_capacities.append(new_cap)
 
     # 確認
-    console.print(f"\n[bold]変更内容:[/bold]")
+    console.print("\n[bold]変更内容:[/bold]")
     console.print(
         f"  パック: {pack_type} x {current_pack_num} → {new_pack_num}"
     )
@@ -983,17 +960,15 @@ def reconfigure(
     seg_name_to_uuid = {s.name: s.uuid for s in segments}
 
     def _build_config(vm) -> dict:
-        extra = getattr(vm, "model_extra", {}) or {}
-        disks = extra.get("hard_disks", [])
         new_disks = []
-        for d, new_cap in zip(disks, new_capacities):
+        for d, new_cap in zip(vm.hard_disks, new_capacities):
             new_disks.append({
                 "disk_number": d.get("disk_number", 1),
                 "device_key": d.get("device_key", 2000),
                 "capacity": new_cap,
             })
         network_adapters = []
-        for n in extra.get("service_networks", []):
+        for n in vm.service_networks:
             network_adapters.append({
                 "adapter_number": n.get("adapter_number", 1),
                 "segment": seg_name_to_uuid.get(n.get("segment", ""), default_seg),
@@ -1015,7 +990,7 @@ def reconfigure(
     else:
         results = _parallel_vm_action(
             vms_detail,
-            lambda v: f"/api/vm/{v.uuid}/reconfigure/",
+            lambda v: vm_action_path(v.uuid, "reconfigure"),
             "構成変更中",
             json_fn=_build_config,
         )
@@ -1033,12 +1008,7 @@ def reconfigure(
         console.print(f"\n{len(task_ids)}台の構成変更を開始しました")
 
     if not no_wait and task_ids:
-        task_results = _parallel_task_wait(task_ids)
-        for data in task_results:
-            obj_name = data.get("object_name", "?")
-            status = data.get("status", "?")
-            style = "[green]" if status == "Completed" else "[red]"
-            console.print(f"  {style}{obj_name}: {status}[/]")
+        _print_task_results(_parallel_task_wait(task_ids))
 
 
 @app.command()
@@ -1067,14 +1037,13 @@ def destroy(
 
     # 稼働中VMを並列停止して完了を待つ
     if running_vms:
-        _parallel_vm_action(running_vms, lambda v: f"/api/vm/{v.uuid}/power_off/", "停止中")
+        _parallel_vm_action(running_vms, lambda v: vm_action_path(v.uuid, "power_off"), "停止中")
         console.print(f"  {len(running_vms)}台の停止リクエスト送信完了")
-        _wait_for_poweroff(running_vms)
-        console.print(f"  → 停止完了")
+        _ensure_stopped(running_vms)
         console.print("")
 
     # 並列削除
-    destroy_results = _parallel_vm_action(vms, lambda v: f"/api/vm/{v.uuid}/destroy/", "削除中")
+    destroy_results = _parallel_vm_action(vms, lambda v: vm_action_path(v.uuid, "destroy"), "削除中")
 
     task_ids: list[str] = []
     for v, resp_data in zip(vms, destroy_results):
@@ -1087,12 +1056,7 @@ def destroy(
     console.print(f"\n{len(task_ids)}台の削除を開始しました")
 
     if not no_wait:
-        task_results = _parallel_task_wait(task_ids)
-        for data in task_results:
-            name = data.get("object_name", "?")
-            status = data.get("status", "?")
-            style = "[green]" if status == "Completed" else "[red]"
-            console.print(f"  {style}{name}: {status}[/]")
+        _print_task_results(_parallel_task_wait(task_ids))
 
 
 @app.command()
@@ -1117,47 +1081,17 @@ def ssh(
 ) -> None:
     """VMにSSH接続する"""
     import os
-    import subprocess
 
     client = get_client()
-
-    if not target:
-        # 一覧から選択
-        pid = resolve_project_id(project_id)
-        all_vms = list_vms(client, pid)
-        stop_active_spinner()
-        running = [v for v in all_vms if v.status == "PowerON"]
-        if not running:
-            console.print("[red]稼働中のVMがありません[/red]")
-            raise typer.Exit(code=1)
-        console.print("\n[bold]稼働中のVM:[/bold]")
-        for i, v in enumerate(running, 1):
-            console.print(f"  {i}) {v.name}")
-        idx = int(questionary.text("\n番号を入力:").unsafe_ask()) - 1
-        vm_uuid = running[idx].uuid
-    elif len(target) == 36 and "-" in target:
-        vm_uuid = target
-    else:
-        # 名前で検索
-        pid = resolve_project_id(project_id)
-        all_vms = list_vms(client, pid)
-        stop_active_spinner()
-        matched = [v for v in all_vms if v.name == target]
-        if not matched:
-            console.print(f"[red]VM '{target}' が見つかりません[/red]")
-            raise typer.Exit(code=1)
-        vm_uuid = matched[0].uuid
+    vm_uuid = _resolve_vm_uuid(client, target, project_id, running_only=True)
 
     # VM詳細からIPを取得
     vm = get_vm(client, vm_uuid)
     stop_active_spinner()
 
-    extra = getattr(vm, "model_extra", {}) or {}
-    nets = extra.get("service_networks", [])
-
+    nets = vm.service_networks
     if not nets:
-        console.print("[red]ネットワーク情報がありません[/red]")
-        raise typer.Exit(code=1)
+        fail("ネットワーク情報がありません")
 
     net = nets[0]
     global_ip = net.get("global_ip", "")
@@ -1169,12 +1103,11 @@ def ssh(
     elif private_ip:
         host = private_ip
     else:
-        console.print("[red]IPアドレスが見つかりません[/red]")
-        raise typer.Exit(code=1)
+        fail("IPアドレスが見つかりません")
 
     # ユーザー名を自動検出（テンプレートの login_username）
     if user == "mdxuser":
-        host_name = extra.get("host_name", "")
+        host_name = vm.host_name or ""
         if host_name:
             try:
                 pid = resolve_project_id(project_id)
@@ -1238,30 +1171,17 @@ def csv(
         matched_names = set(match_names(target, vm_names))
         vms = [v for v in all_vms if v.name in matched_names]
         if not vms:
-            console.print(f"[red]パターン '{target}' に一致するVMがありません[/red]")
-            raise typer.Exit(code=1)
+            fail(f"パターン '{target}' に一致するVMがありません")
     else:
         vms = all_vms
 
-    from mdx_cli.api.parallel import parallel_get
-    from mdx_cli.api.spinner import _console as spin_console
-    from rich.status import Status
-
-    status_display = Status("", console=spin_console, spinner="dots")
-    status_display.start()
-    done_count = 0
-
-    def on_progress(idx: int) -> None:
-        nonlocal done_count
-        done_count += 1
-        status_display.update(f"CSV取得中... ({done_count}/{len(vms)})")
-
-    settings = Settings()
-    store = CredentialStore(config_dir=settings.config_dir)
-    token = store.load_token() or ""
+    token, base_url = get_auth_context()
     paths = [f"/api/vm/{v.uuid}/csv/" for v in vms]
-    results = parallel_get(settings.base_url, token, paths, max_concurrent=50, on_progress=on_progress)
-    status_display.stop()
+    with progress_status("CSV取得中", len(vms)) as progress:
+        results = parallel_get(
+            base_url, token, paths, max_concurrent=50,
+            on_progress=lambda idx: progress.advance(),
+        )
 
     rows = [_vm_csv_row(data) for data in results]
 

@@ -1,6 +1,5 @@
 import questionary
 import typer
-from rich.console import Console
 
 from mdx_cli.api.endpoints.networks import (
     create_dnat,
@@ -10,13 +9,25 @@ from mdx_cli.api.endpoints.networks import (
     update_dnat,
 )
 from mdx_cli.api.spinner import stop_active_spinner
-from mdx_cli.commands._common import get_client, resolve_project_id, resolve_segment_id
+from mdx_cli.commands._common import (
+    fail,
+    find_by_uuid,
+    get_client,
+    resolve_project_id,
+    resolve_segment_id,
+    select_from_list,
+    select_or_exit,
+)
+from mdx_cli.console import console
+from mdx_cli.output.formatting import render
 from mdx_cli.models.network import DNATRequest
-from mdx_cli.output.formatting import console, render
 from mdx_cli.output.tables import DNAT_COLUMNS
-from mdx_cli.settings import Settings
 
 app = typer.Typer(no_args_is_help=True, help="DNAT管理")
+
+
+def _format_dnat(d) -> str:
+    return f"{d.pool_address} → {d.dst_address} [dim]({d.uuid})[/dim]"
 
 
 
@@ -45,14 +56,9 @@ def dnat_add(
     stop_active_spinner()
 
     if not ips:
-        console.print("[red]割当可能なグローバルIPがありません[/red]")
-        raise typer.Exit(code=1)
+        fail("割当可能なグローバルIPがありません")
 
-    console.print("\n[bold]グローバルIP:[/bold]")
-    for i, ip in enumerate(ips, 1):
-        console.print(f"  {i}) {ip}")
-    ip_idx = int(questionary.text("\n番号を入力:").unsafe_ask()) - 1
-    pool_address = ips[ip_idx]
+    pool_address = select_from_list(ips, lambda ip: ip, title="グローバルIP:")
 
     # セグメント選択
     seg_id = resolve_segment_id(client, None, project_id)
@@ -60,7 +66,7 @@ def dnat_add(
     # 宛先アドレス
     dst_address = questionary.text("宛先アドレス（プライベートIP）:").unsafe_ask()
 
-    console.print(f"\n[bold]確認:[/bold]")
+    console.print("\n[bold]確認:[/bold]")
     console.print(f"  グローバルIP: {pool_address}")
     console.print(f"  宛先:         {dst_address}")
 
@@ -90,22 +96,15 @@ def dnat_edit(
     dnats = list_dnats(client, pid)
     stop_active_spinner()
 
-    if not dnats:
-        console.print("[yellow]DNATルールがありません[/yellow]")
-        raise typer.Exit()
-
     if not dnat_id:
-        console.print("\n[bold]DNAT一覧:[/bold]")
-        for i, d in enumerate(dnats, 1):
-            console.print(f"  {i}) {d.pool_address} → {d.dst_address} [dim]({d.uuid})[/dim]")
-        idx = int(questionary.text("\n編集する番号:").unsafe_ask()) - 1
-        selected = dnats[idx]
+        selected = select_or_exit(
+            dnats, _format_dnat,
+            title="DNAT一覧:", prompt="編集する番号:",
+            empty_message="DNATルールがありません",
+        )
         dnat_id = selected.uuid
     else:
-        selected = next((d for d in dnats if d.uuid == dnat_id), None)
-        if not selected:
-            console.print(f"[red]DNAT {dnat_id} が見つかりません[/red]")
-            raise typer.Exit(code=1)
+        selected = find_by_uuid(dnats, dnat_id, label="DNAT")
 
     # グローバルIP選択
     ips = list_assignable_ips(client, pid)
@@ -114,14 +113,13 @@ def dnat_edit(
     if selected.pool_address not in ips:
         ips.insert(0, selected.pool_address)
 
-    console.print(f"\n[bold]現在の値（Enterでそのまま）:[/bold]")
-    console.print(f"\n[bold]グローバルIP:[/bold]")
-    for i, ip in enumerate(ips, 1):
-        current = " [cyan](現在)[/cyan]" if ip == selected.pool_address else ""
-        console.print(f"  {i}) {ip}{current}")
-    default_ip_idx = str(ips.index(selected.pool_address) + 1)
-    ip_idx = int(questionary.text("番号を入力:", default=default_ip_idx).unsafe_ask()) - 1
-    pool_address = ips[ip_idx]
+    console.print("\n[bold]現在の値（Enterでそのまま）:[/bold]")
+    pool_address = select_from_list(
+        ips,
+        lambda ip: f"{ip} [cyan](現在)[/cyan]" if ip == selected.pool_address else ip,
+        title="グローバルIP:",
+        default=ips.index(selected.pool_address) + 1,
+    )
 
     # セグメント
     seg_id = resolve_segment_id(client, None, project_id)
@@ -129,7 +127,7 @@ def dnat_edit(
     # 宛先アドレス
     dst_address = questionary.text("宛先アドレス:", default=selected.dst_address).unsafe_ask()
 
-    console.print(f"\n[bold]変更後:[/bold]")
+    console.print("\n[bold]変更後:[/bold]")
     console.print(f"  グローバルIP: {pool_address}")
     console.print(f"  宛先:         {dst_address}")
 
@@ -160,15 +158,12 @@ def dnat_delete(
         dnats = list_dnats(client, pid)
         stop_active_spinner()
 
-        if not dnats:
-            console.print("[yellow]DNATルールがありません[/yellow]")
-            raise typer.Exit()
-
-        console.print("\n[bold]DNAT一覧:[/bold]")
-        for i, d in enumerate(dnats, 1):
-            console.print(f"  {i}) {d.pool_address} → {d.dst_address} [dim]({d.uuid})[/dim]")
-        idx = int(questionary.text("\n削除する番号:").unsafe_ask()) - 1
-        dnat_id = dnats[idx].uuid
+        selected = select_or_exit(
+            dnats, _format_dnat,
+            title="DNAT一覧:", prompt="削除する番号:",
+            empty_message="DNATルールがありません",
+        )
+        dnat_id = selected.uuid
 
     if not yes:
         if not questionary.confirm(f"DNAT {dnat_id} を削除しますか？").unsafe_ask():

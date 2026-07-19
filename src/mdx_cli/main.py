@@ -1,7 +1,9 @@
 import logging
 
+import httpx
 import typer
 
+from mdx_cli.api.spinner import stop_active_spinner
 from mdx_cli.commands.auth import app as auth_app
 from mdx_cli.commands.network import app as network_app
 from mdx_cli.commands.project import app as project_app
@@ -30,5 +32,32 @@ def main(
         )
 
 
+def cli() -> None:
+    """エントリポイント。httpxのエラーをトレースバックではなく短い表示にする。
+
+    詳細を調べたいときは --verbose でDEBUGログを有効にして再実行する。
+    """
+    from mdx_cli.console import err_console
+
+    try:
+        app()
+    except httpx.HTTPStatusError as e:
+        stop_active_spinner()
+        resp = e.response
+        req = e.request
+        err_console.print(
+            f"[red]APIエラー: {resp.status_code} {resp.reason_phrase} ({req.method} {req.url})[/red]"
+        )
+        raise SystemExit(1)
+    except httpx.ConnectError as e:
+        stop_active_spinner()
+        err_console.print(f"[red]接続できません: {e}（VPN接続を確認してください）[/red]")
+        raise SystemExit(1)
+    except httpx.TimeoutException as e:
+        stop_active_spinner()
+        err_console.print(f"[red]リクエストがタイムアウトしました: {e}[/red]")
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
-    app()
+    cli()

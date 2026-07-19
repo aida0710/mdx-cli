@@ -1,7 +1,5 @@
 import questionary
-from questionary import Choice
 import typer
-from rich.console import Console
 
 from mdx_cli.api.endpoints.networks import (
     create_acl,
@@ -10,13 +8,78 @@ from mdx_cli.api.endpoints.networks import (
     update_acl,
 )
 from mdx_cli.api.spinner import stop_active_spinner
-from mdx_cli.commands._common import get_client, resolve_segment_id
-from mdx_cli.models.network import ACLCreateRequest, ACLUpdateRequest
-from mdx_cli.output.formatting import console, render
+from mdx_cli.commands._common import (
+    find_by_uuid,
+    get_client,
+    resolve_segment_id,
+    select_or_exit,
+)
+from mdx_cli.console import console
+from mdx_cli.models.network import ACL, ACLCreateRequest, ACLUpdateRequest
+from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import ACL_COLUMNS
-from mdx_cli.settings import Settings
 
 app = typer.Typer(no_args_is_help=True, help="ACL管理")
+
+
+def _format_acl(a) -> str:
+    return (
+        f"[cyan]{a.protocol}[/cyan]"
+        f"  {a.src_address}/{a.src_mask} :{a.src_port}"
+        f"  →  {a.dst_address}/{a.dst_mask} :{a.dst_port}"
+        f"  [dim]({a.uuid})[/dim]"
+    )
+
+
+def _prompt_acl_fields(selected: ACL | None = None) -> dict:
+    """ACLルールの各フィールドを対話入力する（add / edit 共通）。
+
+    selected があればその現在値を、なければ新規追加用の初期値をデフォルトにする。
+    ICMP はポート概念がないためポート入力をスキップする。
+    """
+    protocol = questionary.select(
+        "プロトコル:",
+        choices=["TCP", "UDP", "ICMP"],
+        default=selected.protocol if selected else None,
+    ).unsafe_ask()
+    src_address = questionary.text(
+        "送信元アドレス:", default=selected.src_address if selected else "0.0.0.0"
+    ).unsafe_ask()
+    src_mask = questionary.text(
+        "送信元マスク:", default=selected.src_mask if selected else "0.0.0.0"
+    ).unsafe_ask()
+    src_port = selected.src_port if selected else "Any"
+    if protocol != "ICMP":
+        src_port = questionary.text(
+            "送信元ポート:", default=selected.src_port if selected else "Any"
+        ).unsafe_ask()
+    dst_address = questionary.text(
+        "宛先アドレス:", default=selected.dst_address if selected else ""
+    ).unsafe_ask()
+    dst_mask = questionary.text(
+        "宛先マスク:", default=selected.dst_mask if selected else "255.255.255.255"
+    ).unsafe_ask()
+    dst_port = selected.dst_port if selected else "Any"
+    if protocol != "ICMP":
+        dst_port = questionary.text(
+            "宛先ポート:", default=selected.dst_port if selected else "Any"
+        ).unsafe_ask()
+    return {
+        "protocol": protocol,
+        "src_address": src_address,
+        "src_mask": src_mask,
+        "src_port": src_port,
+        "dst_address": dst_address,
+        "dst_mask": dst_mask,
+        "dst_port": dst_port,
+    }
+
+
+def _print_acl_summary(header: str, fields: dict) -> None:
+    console.print(f"\n[bold]{header}[/bold]")
+    console.print(f"  プロトコル: {fields['protocol']}")
+    console.print(f"  送信元:     {fields['src_address']}/{fields['src_mask']} :{fields['src_port']}")
+    console.print(f"  宛先:       {fields['dst_address']}/{fields['dst_mask']} :{fields['dst_port']}")
 
 
 
@@ -44,36 +107,13 @@ def acl_add(
     seg_id = resolve_segment_id(client, segment_id, project_id)
 
     console.print("\n[bold]ACLルール追加[/bold]")
-    protocol = questionary.select("プロトコル:", choices=["TCP", "UDP", "ICMP"]).unsafe_ask()
-    src_address = questionary.text("送信元アドレス:", default="0.0.0.0").unsafe_ask()
-    src_mask = questionary.text("送信元マスク:", default="0.0.0.0").unsafe_ask()
-    src_port = "Any"
-    if protocol != "ICMP":
-        src_port = questionary.text("送信元ポート:", default="Any").unsafe_ask()
-    dst_address = questionary.text("宛先アドレス:").unsafe_ask()
-    dst_mask = questionary.text("宛先マスク:", default="255.255.255.255").unsafe_ask()
-    dst_port = "Any"
-    if protocol != "ICMP":
-        dst_port = questionary.text("宛先ポート:", default="Any").unsafe_ask()
-
-    console.print(f"\n[bold]確認:[/bold]")
-    console.print(f"  プロトコル: {protocol}")
-    console.print(f"  送信元:     {src_address}/{src_mask} :{src_port}")
-    console.print(f"  宛先:       {dst_address}/{dst_mask} :{dst_port}")
+    fields = _prompt_acl_fields()
+    _print_acl_summary("確認:", fields)
 
     if not questionary.confirm("\n追加しますか？").unsafe_ask():
         raise typer.Abort()
 
-    req = ACLCreateRequest(
-        protocol=protocol,
-        src_address=src_address,
-        src_mask=src_mask,
-        src_port=src_port,
-        dst_address=dst_address,
-        dst_mask=dst_mask,
-        dst_port=dst_port,
-        segment=seg_id,
-    )
+    req = ACLCreateRequest(**fields, segment=seg_id)
     acl = create_acl(client, req)
     render(acl, ACL_COLUMNS, json_mode=json)
 
@@ -88,72 +128,30 @@ def acl_edit(
     """ACLルール編集（対話式）"""
     client = get_client(silent=json)
 
-    # ACL ID が未指定なら一覧から選択
+    # IDから現在値を取得するにはlist経由で探す必要がある
+    seg_id = resolve_segment_id(client, segment_id, project_id)
+    acls = list_acls(client, seg_id)
+    stop_active_spinner()
+
     if not acl_id:
-        seg_id = resolve_segment_id(client, segment_id, project_id)
-        acls = list_acls(client, seg_id)
-        stop_active_spinner()
-
-        if not acls:
-            console.print("[yellow]ACLルールがありません[/yellow]")
-            raise typer.Exit()
-
-        console.print("\n[bold]ACL一覧:[/bold]")
-        for i, a in enumerate(acls, 1):
-            console.print(
-                f"  {i}) [cyan]{a.protocol}[/cyan]"
-                f"  {a.src_address}/{a.src_mask} :{a.src_port}"
-                f"  →  {a.dst_address}/{a.dst_mask} :{a.dst_port}"
-                f"  [dim]({a.uuid})[/dim]"
-            )
-        idx = int(questionary.text("\n編集する番号:").unsafe_ask()) - 1
-        selected = acls[idx]
+        selected = select_or_exit(
+            acls, _format_acl,
+            title="ACL一覧:", prompt="編集する番号:",
+            empty_message="ACLルールがありません",
+        )
         acl_id = selected.uuid
     else:
-        # IDから現在値を取得するにはlist経由で探す必要がある
-        seg_id = resolve_segment_id(client, segment_id, project_id)
-        acls = list_acls(client, seg_id)
-        stop_active_spinner()
-        selected = next((a for a in acls if a.uuid == acl_id), None)
-        if not selected:
-            console.print(f"[red]ACL {acl_id} が見つかりません[/red]")
-            raise typer.Exit(code=1)
+        selected = find_by_uuid(acls, acl_id, label="ACL")
 
     # 現在値を表示して編集
-    console.print(f"\n[bold]現在の値（Enterでそのまま）:[/bold]")
-    protocol = questionary.select(
-        "プロトコル:",
-        choices=["TCP", "UDP", "ICMP"],
-        default=selected.protocol,
-    ).unsafe_ask()
-    src_address = questionary.text("送信元アドレス:", default=selected.src_address).unsafe_ask()
-    src_mask = questionary.text("送信元マスク:", default=selected.src_mask).unsafe_ask()
-    src_port = selected.src_port
-    if protocol != "ICMP":
-        src_port = questionary.text("送信元ポート:", default=selected.src_port).unsafe_ask()
-    dst_address = questionary.text("宛先アドレス:", default=selected.dst_address).unsafe_ask()
-    dst_mask = questionary.text("宛先マスク:", default=selected.dst_mask).unsafe_ask()
-    dst_port = selected.dst_port
-    if protocol != "ICMP":
-        dst_port = questionary.text("宛先ポート:", default=selected.dst_port).unsafe_ask()
-
-    console.print(f"\n[bold]変更後:[/bold]")
-    console.print(f"  プロトコル: {protocol}")
-    console.print(f"  送信元:     {src_address}/{src_mask} :{src_port}")
-    console.print(f"  宛先:       {dst_address}/{dst_mask} :{dst_port}")
+    console.print("\n[bold]現在の値（Enterでそのまま）:[/bold]")
+    fields = _prompt_acl_fields(selected)
+    _print_acl_summary("変更後:", fields)
 
     if not questionary.confirm("\n更新しますか？").unsafe_ask():
         raise typer.Abort()
 
-    req = ACLUpdateRequest(
-        protocol=protocol,
-        src_address=src_address,
-        src_mask=src_mask,
-        src_port=src_port,
-        dst_address=dst_address,
-        dst_mask=dst_mask,
-        dst_port=dst_port,
-    )
+    req = ACLUpdateRequest(**fields)
     acl = update_acl(client, acl_id, req)
     render(acl, ACL_COLUMNS, json_mode=json)
 
@@ -173,20 +171,12 @@ def acl_delete(
         acls = list_acls(client, seg_id)
         stop_active_spinner()
 
-        if not acls:
-            console.print("[yellow]ACLルールがありません[/yellow]")
-            raise typer.Exit()
-
-        console.print("\n[bold]ACL一覧:[/bold]")
-        for i, a in enumerate(acls, 1):
-            console.print(
-                f"  {i}) [cyan]{a.protocol}[/cyan]"
-                f"  {a.src_address}/{a.src_mask} :{a.src_port}"
-                f"  →  {a.dst_address}/{a.dst_mask} :{a.dst_port}"
-                f"  [dim]({a.uuid})[/dim]"
-            )
-        idx = int(questionary.text("\n削除する番号:").unsafe_ask()) - 1
-        acl_id = acls[idx].uuid
+        selected = select_or_exit(
+            acls, _format_acl,
+            title="ACL一覧:", prompt="削除する番号:",
+            empty_message="ACLルールがありません",
+        )
+        acl_id = selected.uuid
 
     if not yes:
         if not questionary.confirm(f"ACL {acl_id} を削除しますか？").unsafe_ask():

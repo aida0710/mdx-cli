@@ -1,11 +1,38 @@
 """コマンド共通ヘルパー"""
 
+import re
+from typing import Callable, NoReturn, Sequence, TypeVar
+
+import questionary
 import typer
 
 from mdx_cli.api.auth import refresh_saved_token, token_needs_refresh
 from mdx_cli.api.client import create_client
-from mdx_cli.credentials.store import CredentialStore
-from mdx_cli.settings import Settings
+from mdx_cli.console import console, err_console
+from mdx_cli.credentials.store import get_store
+from mdx_cli.settings import get_settings
+
+T = TypeVar("T")
+
+_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    re.IGNORECASE,
+)
+
+
+def is_uuid(value: str) -> bool:
+    """ハイフン区切りの正規UUID形式か判定する。
+
+    `len == 36 かつ "-" を含む` のような曖昧判定だと36文字のVM名を
+    誤判定するため、形式を厳密にチェックする。
+    """
+    return bool(_UUID_RE.fullmatch(value))
+
+
+def fail(message: str) -> NoReturn:
+    """エラーを赤字で表示して終了コード1で抜ける。"""
+    console.print(f"[red]{message}[/red]")
+    raise typer.Exit(code=1)
 
 
 def get_client(silent: bool = False):
@@ -14,8 +41,8 @@ def get_client(silent: bool = False):
     トークンの期限が近い場合は事前リフレッシュして保存し、新トークンでクライアントを作る。
     リフレッシュ失敗時は既存トークンで続行（MDXAuth の 401 ハンドリングが保険）。
     """
-    settings = Settings()
-    store = CredentialStore(config_dir=settings.config_dir)
+    settings = get_settings()
+    store = get_store()
     token = store.load_token()
 
     if token and token_needs_refresh(token):
@@ -27,6 +54,27 @@ def get_client(silent: bool = False):
     return create_client(token=token, silent=silent)
 
 
+def get_auth_context() -> tuple[str, str]:
+    """並列API（parallel_get/post/wait）用に (トークン, ベースURL) を返す。"""
+    return get_store().load_token() or "", get_settings().base_url
+
+
+def refresh_token_proactive() -> None:
+    """バルク操作前にトークンを無条件リフレッシュして保存する。
+
+    parallel_post は MDXAuth を経由しないため、チャンクごとに新鮮なトークンを
+    取得しておく。失敗時は既存トークンで続行。
+    """
+    store = get_store()
+    token = store.load_token()
+    if not token:
+        return
+
+    new_token = refresh_saved_token(token, get_settings().base_url)
+    if new_token:
+        store.save_token(new_token)
+
+
 def resolve_project_id(project_id: str | None) -> str:
     """プロジェクトIDを解決する。
 
@@ -35,9 +83,7 @@ def resolve_project_id(project_id: str | None) -> str:
     if project_id:
         return project_id
 
-    settings = Settings()
-    store = CredentialStore(config_dir=settings.config_dir)
-    saved = store.load_project_id()
+    saved = get_store().load_project_id()
     if saved:
         return saved
 
@@ -47,29 +93,76 @@ def resolve_project_id(project_id: str | None) -> str:
     )
 
 
-def ask_or_abort(result):
-    """questionary の .ask() 結果が None（Ctrl+C）なら Abort する。"""
-    if result is None:
-        raise typer.Abort()
-    return result
-
-
-def prompt_int(label: str, max_val: int | None = None) -> int:
-    """番号入力。数字以外や範囲外でリトライする。"""
-    import questionary
+def prompt_int(
+    label: str,
+    max_val: int | None = None,
+    default: str | None = None,
+) -> int:
+    """番号入力。非数値・0以下・範囲外はリトライする。"""
     while True:
-        raw = questionary.text(label).unsafe_ask()
+        raw = questionary.text(label, default=default or "").unsafe_ask()
         try:
             val = int(raw)
         except ValueError:
-            from rich.console import Console
-            Console(stderr=True).print("[red]数字を入力してください[/red]")
+            err_console.print("[red]数字を入力してください[/red]")
             continue
-        if max_val is not None and (val < 1 or val > max_val):
-            from rich.console import Console
-            Console(stderr=True).print(f"[red]1〜{max_val} の範囲で入力してください[/red]")
+        if val < 1 or (max_val is not None and val > max_val):
+            limit = f"1〜{max_val}" if max_val is not None else "1以上"
+            err_console.print(f"[red]{limit} の範囲で入力してください[/red]")
             continue
         return val
+
+
+def select_from_list(
+    items: Sequence[T],
+    formatter: Callable[[T], str],
+    title: str | None = None,
+    prompt: str = "番号を入力:",
+    default: int | None = None,
+) -> T:
+    """一覧をRichで表示し、番号入力（1始まり）で1件選択する。
+
+    formatter は要素を表示文字列（Richマークアップ可）に変換する。
+    番号は prompt_int でバリデーションされ、不正入力はリトライになる。
+    空リストは呼び出し側で先にチェックする契約（ValueError）。
+    """
+    if not items:
+        raise ValueError("選択肢が空です")
+    if title:
+        console.print(f"\n[bold]{title}[/bold]")
+    for i, item in enumerate(items, 1):
+        console.print(f"  {i}) {formatter(item)}")
+    idx = prompt_int(
+        f"\n{prompt}",
+        max_val=len(items),
+        default=str(default) if default is not None else None,
+    ) - 1
+    return items[idx]
+
+
+def select_or_exit(
+    items: Sequence[T],
+    formatter: Callable[[T], str],
+    title: str | None = None,
+    prompt: str = "番号を入力:",
+    empty_message: str = "対象がありません",
+) -> T:
+    """一覧から1件選択する。空なら黄色メッセージを表示して正常終了する。
+
+    edit / delete 系コマンドの「ID未指定なら一覧から選択」フロー用。
+    """
+    if not items:
+        console.print(f"[yellow]{empty_message}[/yellow]")
+        raise typer.Exit()
+    return select_from_list(items, formatter, title=title, prompt=prompt)
+
+
+def find_by_uuid(items: Sequence[T], uuid: str, label: str) -> T:
+    """uuid が一致する要素を返す。見つからなければエラー表示して終了する。"""
+    found = next((i for i in items if i.uuid == uuid), None)
+    if found is None:
+        fail(f"{label} {uuid} が見つかりません")
+    return found
 
 
 def resolve_segment_id(client, segment_id: str | None, project_id: str | None) -> str:
@@ -77,22 +170,22 @@ def resolve_segment_id(client, segment_id: str | None, project_id: str | None) -
     if segment_id:
         return segment_id
 
-    import questionary
-    from rich.console import Console
     from mdx_cli.api.endpoints.networks import list_segments
     from mdx_cli.api.spinner import stop_active_spinner
 
-    console = Console()
     pid = resolve_project_id(project_id)
     segments = list_segments(client, pid)
     stop_active_spinner()
 
+    if not segments:
+        fail("セグメントが見つかりません")
     if len(segments) == 1:
         console.print(f"セグメント: [bold]{segments[0].name}[/bold] (自動選択)")
         return segments[0].uuid
 
-    console.print("\n[bold]セグメント:[/bold]")
-    for i, s in enumerate(segments, 1):
-        console.print(f"  {i}) {s.name} [dim]({s.uuid})[/dim]")
-    idx = int(questionary.text("\n番号を入力:").unsafe_ask()) - 1
-    return segments[idx].uuid
+    selected = select_from_list(
+        segments,
+        lambda s: f"{s.name} [dim]({s.uuid})[/dim]",
+        title="セグメント:",
+    )
+    return selected.uuid
