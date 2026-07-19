@@ -12,8 +12,6 @@ from mdx_cli.api.endpoints.vms import (
     list_vms,
     reconfigure_vm,
     rename_vm,
-    reset_vm,
-    shutdown_vm,
     sync_vms,
     vm_action_path,
 )

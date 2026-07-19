@@ -23,13 +23,13 @@ uv tool install .
 Codex / Claude Code の skill として使う場合:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/aida0710/mdx-cli/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/aida0710/mdx-cli/main/codebot-skill-install.sh | sh
 ```
 
 ローカルのこのリポジトリから入れる場合:
 
 ```bash
-sh install.sh --source . --codex-only
+sh codebot-skill-install.sh --source . --codex-only
 ```
 
 ### アップデート
