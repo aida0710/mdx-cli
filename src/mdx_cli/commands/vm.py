@@ -19,6 +19,7 @@ from mdx_cli.api.endpoints.vms import (
     power_on_vm,
     reboot_vm,
     reconfigure_vm,
+    rename_vm,
     reset_vm,
     shutdown_vm,
     sync_vms,
@@ -530,6 +531,42 @@ def _check_reconfigure_homogeneity(vms: list) -> None:
         raise typer.Exit(code=1)
 
 
+def _build_rename_plan(
+    vms: list,
+    all_vms: list,
+    *,
+    new_name: str | None,
+    suffix: str | None,
+) -> list[tuple[object, str]]:
+    """名前変更計画を作り、空名・重複・既存VMとの衝突を検証する。"""
+    if (new_name is None) == (suffix is None):
+        raise ValueError("新しいVM名または --suffix のどちらか一方を指定してください")
+    if new_name is not None and len(vms) != 1:
+        raise ValueError("複数VMの名前変更には --suffix を使用してください")
+
+    if new_name is not None:
+        plan = [(vms[0], new_name.strip())]
+    else:
+        if not suffix:
+            raise ValueError("--suffix に空文字は指定できません")
+        plan = [(vm, f"{vm.name}{suffix}") for vm in vms]
+
+    target_names = {vm.name for vm in vms}
+    reserved_names = {vm.name for vm in all_vms} - target_names
+    planned_names = [name for _, name in plan]
+    if any(not name for name in planned_names):
+        raise ValueError("VM名を空にすることはできません")
+    if len(planned_names) != len(set(planned_names)):
+        raise ValueError("変更後のVM名が重複しています")
+
+    for vm, planned_name in plan:
+        if planned_name == vm.name:
+            raise ValueError(f"{vm.name}: 現在と同じVM名です")
+        if planned_name in reserved_names:
+            raise ValueError(f"変更後のVM名が既存VMと衝突します: {planned_name}")
+    return plan
+
+
 def _parallel_vm_action(vms: list, action_path_fn, action_name: str, json_fn=None) -> list[dict]:
     """VM一括操作を並列実行する。
 
@@ -714,6 +751,106 @@ def reset(
     for v in vms:
         console.print(f"  [green]✓[/green] {v.name}")
     console.print(f"\n{len(vms)}台のリセットを実行しました")
+
+
+@app.command()
+def rename(
+    target: str = typer.Argument(
+        help="VM ID、名前、またはパターン (例: 'worker-*' ※シェルでクォート必須)"
+    ),
+    new_name: str = typer.Argument(None, help="新しいVM名（単一VMの場合）"),
+    suffix: str = typer.Option(
+        None,
+        "--suffix",
+        help="対象VMの現在名に付けるsuffix（パターンによる一括変更に対応）",
+    ),
+    project_id: str = typer.Option(
+        None,
+        "--project-id",
+        "-p",
+        help="プロジェクトID",
+        envvar="MDX_PROJECT_ID",
+    ),
+    no_wait: bool = typer.Option(False, "--no-wait", help="タスク完了を待たない"),
+) -> None:
+    """VM名変更（単一名指定、または --suffix によるパターン一括変更）"""
+    pid = resolve_project_id(project_id)
+    client = get_client()
+    vms = _resolve_vms(client, target, pid)
+    all_vms = list_vms(client, pid)
+    stop_active_spinner()
+
+    try:
+        plan = _build_rename_plan(
+            vms,
+            all_vms,
+            new_name=new_name,
+            suffix=suffix,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"\n[bold]{len(plan)}台のVM名を変更します:[/bold]")
+    for vm, planned_name in plan:
+        console.print(f"  {vm.name} → {planned_name} [dim]({vm.uuid})[/dim]")
+
+    if len(plan) > 1:
+        if not questionary.confirm(
+            f"\n{len(plan)}台のVM名を変更しますか？"
+        ).unsafe_ask():
+            raise typer.Abort()
+
+    task_ids: list[str] = []
+    failed = False
+    if len(plan) == 1:
+        vm, planned_name = plan[0]
+        task_id = rename_vm(client, vm.uuid, planned_name)
+        stop_active_spinner()
+        if task_id:
+            task_ids.append(task_id)
+            console.print(f"  [green]✓[/green] {vm.name} → タスク: {task_id}")
+        else:
+            failed = True
+            console.print(f"  [red]✗[/red] {vm.name} → task_id が返されませんでした")
+    else:
+        names_by_uuid = {vm.uuid: planned_name for vm, planned_name in plan}
+        results = _parallel_vm_action(
+            vms,
+            lambda vm: f"/api/vm/{vm.uuid}/rename/",
+            "名前変更中",
+            json_fn=lambda vm: {"vm_name": names_by_uuid[vm.uuid]},
+        )
+        for vm, result in zip(vms, results):
+            if isinstance(result, Exception):
+                failed = True
+                console.print(f"  [red]✗[/red] {vm.name} → {result}")
+                continue
+            task_id = result.get("task_id", "")
+            if isinstance(task_id, list):
+                task_id = task_id[0] if task_id else ""
+            if not task_id:
+                failed = True
+                console.print(
+                    f"  [red]✗[/red] {vm.name} → task_id が返されませんでした"
+                )
+                continue
+            task_ids.append(task_id)
+            console.print(f"  [green]✓[/green] {vm.name} → タスク: {task_id}")
+
+    console.print(f"\n{len(task_ids)}台の名前変更を開始しました")
+    if not no_wait and task_ids:
+        task_results = _parallel_task_wait(task_ids)
+        for data in task_results:
+            name = data.get("object_name", "?")
+            status = data.get("status", "?")
+            if status != "Completed":
+                failed = True
+            style = "[green]" if status == "Completed" else "[red]"
+            console.print(f"  {style}{name}: {status}[/]")
+
+    if failed:
+        raise typer.Exit(code=1)
 
 
 @app.command()
