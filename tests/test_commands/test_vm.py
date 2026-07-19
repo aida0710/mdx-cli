@@ -74,6 +74,113 @@ def test_vm_start_pattern():
                     mock_action.assert_called_once()
 
 
+def test_vm_rename_single():
+    vm = _make_vm("worker-0", "uuid-0", status="PowerOFF")
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=[vm]):
+        with patch("mdx_cli.commands.vm.list_vms", return_value=[vm]):
+            with patch(
+                "mdx_cli.commands.vm.rename_vm", return_value="task-rename"
+            ) as mock_rename:
+                with patch(
+                    "mdx_cli.commands.vm._parallel_task_wait",
+                    return_value=[
+                        {"object_name": vm.name, "status": "Completed"}
+                    ],
+                ):
+                    with patch("mdx_cli.commands.vm.get_client"):
+                        with patch(
+                            "mdx_cli.commands.vm.resolve_project_id",
+                            return_value="proj-1",
+                        ):
+                            result = runner.invoke(
+                                app,
+                                ["rename", vm.uuid, "worker-0-vpn", "-p", "proj-1"],
+                            )
+
+    assert result.exit_code == 0, result.output
+    mock_rename.assert_called_once_with(mock_rename.call_args.args[0], vm.uuid, "worker-0-vpn")
+
+
+def test_vm_rename_pattern_with_suffix():
+    vms = [
+        _make_vm("worker-0", "uuid-0", status="PowerOFF"),
+        _make_vm("worker-1", "uuid-1", status="PowerOFF"),
+    ]
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm.list_vms", return_value=vms):
+            with patch(
+                "mdx_cli.commands.vm._parallel_vm_action",
+                return_value=[{"task_id": "task-0"}, {"task_id": "task-1"}],
+            ) as mock_action:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch(
+                        "mdx_cli.commands.vm.resolve_project_id",
+                        return_value="proj-1",
+                    ):
+                        with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                            mock_q.confirm.return_value.unsafe_ask.return_value = True
+                            result = runner.invoke(
+                                app,
+                                [
+                                    "rename",
+                                    "worker-*",
+                                    "--suffix",
+                                    "-vpn",
+                                    "-p",
+                                    "proj-1",
+                                    "--no-wait",
+                                ],
+                            )
+
+    assert result.exit_code == 0, result.output
+    action_args = mock_action.call_args.args
+    assert action_args[1](vms[0]) == "/api/vm/uuid-0/rename/"
+    assert mock_action.call_args.kwargs["json_fn"](vms[0]) == {
+        "vm_name": "worker-0-vpn"
+    }
+    assert mock_action.call_args.kwargs["json_fn"](vms[1]) == {
+        "vm_name": "worker-1-vpn"
+    }
+
+
+def test_vm_rename_rejects_bulk_new_name():
+    vms = [_make_vm("worker-0", "uuid-0"), _make_vm("worker-1", "uuid-1")]
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm.list_vms", return_value=vms):
+            with patch("mdx_cli.commands.vm.get_client"):
+                with patch(
+                    "mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"
+                ):
+                    result = runner.invoke(
+                        app,
+                        ["rename", "worker-*", "one-name", "-p", "proj-1"],
+                    )
+
+    assert result.exit_code == 1
+    assert "複数VMの名前変更には --suffix" in result.output
+
+
+def test_vm_rename_rejects_existing_name_collision():
+    vm = _make_vm("worker-0", "uuid-0")
+    existing = _make_vm("worker-0-vpn", "uuid-existing")
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=[vm]):
+        with patch("mdx_cli.commands.vm.list_vms", return_value=[vm, existing]):
+            with patch("mdx_cli.commands.vm.rename_vm") as mock_rename:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch(
+                        "mdx_cli.commands.vm.resolve_project_id",
+                        return_value="proj-1",
+                    ):
+                        result = runner.invoke(
+                            app,
+                            ["rename", vm.uuid, existing.name, "-p", "proj-1"],
+                        )
+
+    assert result.exit_code == 1
+    assert "既存VMと衝突" in result.output
+    mock_rename.assert_not_called()
+
+
 # --- reconfigure 均質性チェック ---
 
 
