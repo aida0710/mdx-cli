@@ -34,15 +34,16 @@ value = questionary.text("ラベル:", default="デフォルト値").ask()
 password = questionary.password("パスワード:").ask()
 ```
 
-### リスト選択: Rich表示 + questionary.text() で番号入力
-情報量が多いリスト（テンプレート、プロジェクト等）はRichで色付き表示し、番号で選択する。`questionary.select()` は色やフォーマットが使えないため使わない。
+### リスト選択: select_from_list()
+情報量が多いリスト（テンプレート、プロジェクト等）は `_common.select_from_list()` で色付き表示＋番号選択する。`questionary.select()` は色やフォーマットが使えないため使わない。番号は内部でバリデーションされ、0・範囲外・非数値はリトライになる。`int(questionary.text())-1` の直書きはしない（0入力で末尾要素を選ぶバグの温床）。
 
 ```python
-console.print("\n[bold]テンプレート:[/bold]")
-for i, t in enumerate(items, 1):
-    console.print(f"  {i}) {t.name} [cyan]{t.detail}[/cyan]")
-idx = int(questionary.text("番号を入力:").ask()) - 1
-selected = items[idx]
+from mdx_cli.commands._common import select_from_list
+selected = select_from_list(
+    items,
+    lambda t: f"{t.name} [cyan]{t.detail}[/cyan]",  # Richマークアップ可
+    title="テンプレート:",
+)
 ```
 
 ### 2択選択: questionary.select()
@@ -62,6 +63,15 @@ if not questionary.confirm("実行しますか？").ask():
     raise typer.Abort()
 ```
 
+### コンソールとエラー終了
+Console は個別に生成せず `mdx_cli.console` の共有インスタンスを使う。結果・対話UIは `console`（stdout）、スピナー・進捗は `err_console`（stderr）。エラー表示+終了は `_common.fail()`。
+
+```python
+from mdx_cli.console import console
+from mdx_cli.commands._common import fail
+fail("VM が見つかりません")  # 赤字表示して typer.Exit(code=1)
+```
+
 ## API通信パターン
 
 ### スピナー: RequestSpinner（自動）
@@ -73,12 +83,28 @@ data = list_vms(client, pid)
 render(data, VM_COLUMNS, json_mode=json)  # render() 内で自動停止
 ```
 
-render() を使わないコマンド（vm stop 等）では明示的に停止:
+render() を使わないコマンド（vm sync 等）では明示的に停止:
 ```python
-power_off_vm(client, vm_id)
+sync_vms(client, pid)
 stop_active_spinner()
-console.print(f"VM {vm_id} を停止しました")
+console.print("VM情報を同期しました")
 ```
+
+### 並列処理の進捗表示: progress_status()
+並列取得・一括操作の「ラベル... (done/total)」進捗は `spinner.progress_status()` を使う。`--json` 時は `enabled=False` で no-op。
+
+```python
+from mdx_cli.api.spinner import progress_status
+with progress_status("詳細取得中", len(vms)) as progress:
+    results = parallel_get(base_url, token, paths,
+                           on_progress=lambda idx: progress.advance(vms[idx].name))
+```
+
+### 並列API用の認証: get_auth_context()
+`parallel_get/post/wait` は MDXAuth を経由しないため、`_common.get_auth_context()` で (token, base_url) を取得する。長時間のバルク操作はチャンクごとに `refresh_token_proactive()` を呼ぶ。
+
+### 設定・ストア: get_settings() / get_store()
+`Settings()` / `CredentialStore()` を直接生成せず、キャッシュ付きの `get_settings()` / `get_store()` を使う。テストでは conftest の autouse フィクスチャがキャッシュをクリアする。
 
 ### ページネーション: fetch_all()
 リスト系APIは `fetch_all()` を使う。サーバーのpage_size上限（100）に対応して自動で全ページ取得。
@@ -89,7 +115,7 @@ items = fetch_all(client, f"/api/vm/project/{pid}/")
 ```
 
 ### Pydanticモデル: extra="allow"
-APIレスポンスのフィールドは推測を含むため、全モデルに `extra="allow"` を設定。未知フィールドでクラッシュしない。
+APIレスポンスのフィールドは推測を含むため、全モデルに `extra="allow"` を設定。未知フィールドでクラッシュしない。ロジックで参照する頻出フィールド（VM の pack_type / hard_disks 等）は型付きフィールドに昇格させ、表示にしか使わないものは `model_extra` から参照する。
 
 ```python
 class VM(BaseModel):
@@ -97,7 +123,11 @@ class VM(BaseModel):
     uuid: str
     name: str
     status: str
+    pack_type: str | None = None  # ロジックで使うため昇格
 ```
+
+### パック仕様: PACK_SPECS
+CPU/GPUパックの上限・メモリ係数などの定数は `models/pack.py` の `PACK_SPECS` に集約。deploy / reconfigure で直書きしない。
 
 ### プロジェクトID: resolve_project_id()
 `--project-id` はオプショナル。省略時は `mdx project select` で保存済みのIDを使う。
