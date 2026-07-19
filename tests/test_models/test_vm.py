@@ -52,3 +52,34 @@ def test_vm_deploy_request_defaults():
 def test_vm_deploy_response():
     resp = VMDeployResponse.model_validate({"task_id": ["task-abc"]})
     assert resp.task_id == ["task-abc"]
+
+def test_vm_promotes_detail_fields():
+    """詳細APIで返る頻出フィールドは型付きフィールドとして参照できる"""
+    data = {
+        "name": "test-vm",
+        "status": "PowerON",
+        "pack_type": "gpu",
+        "pack_num": 2,
+        "host_name": "ubuntu-2204",
+        "hard_disks": [{"disk_number": 1, "device_key": 2000, "capacity": "40 GB"}],
+        "service_networks": [{"adapter_number": 1, "ipv4_address": ["10.15.0.1"]}],
+        "storage_networks": [],
+    }
+    vm = VM.model_validate(data)
+    assert vm.pack_type == "gpu"
+    assert vm.pack_num == 2
+    assert vm.host_name == "ubuntu-2204"
+    assert vm.hard_disks[0]["capacity"] == "40 GB"
+    assert vm.service_networks[0]["ipv4_address"] == ["10.15.0.1"]
+    assert vm.storage_networks == []
+
+
+def test_vm_detail_fields_default_when_absent():
+    """一覧APIのように詳細フィールドが無くてもデフォルトで参照できる"""
+    vm = VM.model_validate({"name": "test-vm", "status": "PowerOFF"})
+    assert vm.pack_type is None
+    assert vm.pack_num is None
+    assert vm.host_name is None
+    assert vm.hard_disks == []
+    assert vm.service_networks == []
+    assert vm.storage_networks == []

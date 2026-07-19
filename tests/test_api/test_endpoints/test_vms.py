@@ -97,7 +97,6 @@ def test_destroy_vm():
     resp = destroy_vm(client, "vm-1")
     assert resp.task_id == ["task-del"]
 
-
 @respx.mock
 def test_rename_vm_with_string_task_id():
     route = respx.post("/api/vm/vm-1/rename/").mock(
@@ -121,3 +120,11 @@ def test_rename_vm_with_list_task_id():
     task_id = rename_vm(client, "vm-1", "renamed-vm")
 
     assert task_id == "task-rename"
+
+
+def test_vm_action_path():
+    """VM操作APIのパスを一元的に構築する。"""
+    from mdx_cli.api.endpoints.vms import vm_action_path
+
+    assert vm_action_path("uuid-1", "power_on") == "/api/vm/uuid-1/power_on/"
+    assert vm_action_path("uuid-2", "destroy") == "/api/vm/uuid-2/destroy/"

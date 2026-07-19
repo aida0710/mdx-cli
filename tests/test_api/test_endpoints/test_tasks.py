@@ -2,7 +2,6 @@ import httpx
 import respx
 
 from mdx_cli.api.endpoints.tasks import get_task, wait_for_task
-from mdx_cli.models.task import Task
 
 
 @respx.mock

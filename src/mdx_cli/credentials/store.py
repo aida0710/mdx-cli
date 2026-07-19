@@ -1,6 +1,7 @@
 import json
 import os
 import platform
+from functools import lru_cache
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -123,3 +124,15 @@ class CredentialStore:
         decrypted = f.decrypt(cred_file.read_bytes())
         data = json.loads(decrypted)
         return (data["username"], data["password"])
+
+
+@lru_cache
+def get_store() -> CredentialStore:
+    """共有のCredentialStoreインスタンスを返す。
+
+    config_dir は get_settings() から解決する。
+    テストで環境変数を変える場合は cache_clear() を呼ぶこと。
+    """
+    from mdx_cli.settings import get_settings
+
+    return CredentialStore(config_dir=get_settings().config_dir)

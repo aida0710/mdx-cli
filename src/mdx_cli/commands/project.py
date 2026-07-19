@@ -1,7 +1,4 @@
-import questionary
-from questionary import Choice
 import typer
-from rich.console import Console
 
 from mdx_cli.api.spinner import stop_active_spinner
 from mdx_cli.api.endpoints.projects import (
@@ -11,14 +8,13 @@ from mdx_cli.api.endpoints.projects import (
     list_access_keys,
     list_projects,
 )
-from mdx_cli.commands._common import get_client, resolve_project_id
-from mdx_cli.credentials.store import CredentialStore
+from mdx_cli.commands._common import fail, get_client, resolve_project_id, select_from_list
+from mdx_cli.console import console
+from mdx_cli.credentials.store import get_store
 from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import ACCESS_KEY_COLUMNS, PROJECT_COLUMNS
-from mdx_cli.settings import Settings
 
 app = typer.Typer(no_args_is_help=True, help="プロジェクト管理")
-console = Console()
 
 
 
@@ -54,27 +50,27 @@ def summary_cmd(
     guarantee = overview["guarantee_vm"]
     resource = overview["resource"]
 
-    console.print(f"\n[bold]VM（スポット）:[/bold]")
+    console.print("\n[bold]VM（スポット）:[/bold]")
     console.print(f"  [green]稼働中: {spot['power_on']}[/green]  停止: {spot['power_off']}  未割当: {spot['deallocated']}  合計: {spot['total']}")
 
     if guarantee["total"] > 0:
-        console.print(f"\n[bold]VM（保証）:[/bold]")
+        console.print("\n[bold]VM（保証）:[/bold]")
         console.print(f"  [green]稼働中: {guarantee['power_on']}[/green]  停止: {guarantee['power_off']}  未割当: {guarantee['deallocated']}  合計: {guarantee['total']}")
 
     disk = resource.get("disk_size", {})
     used = disk.get("used", 0)
     unused = disk.get("unused", 0)
     total_disk = used + unused
-    console.print(f"\n[bold]VMディスク:[/bold]")
+    console.print("\n[bold]VMディスク:[/bold]")
     console.print(f"  使用: {used:.0f} GB / {total_disk:.0f} GB（残り {unused:.0f} GB）")
 
     cpu = resource.get("cpu_pack", {})
     gpu = resource.get("gpu_pack", {})
     if cpu.get("used", 0) > 0 or cpu.get("unused", 0) > 0:
-        console.print(f"\n[bold]CPUパック:[/bold]")
+        console.print("\n[bold]CPUパック:[/bold]")
         console.print(f"  使用: {cpu['used']}  未使用: {cpu['unused']}")
     if gpu.get("used", 0) > 0 or gpu.get("unused", 0) > 0:
-        console.print(f"\n[bold]GPUパック:[/bold]")
+        console.print("\n[bold]GPUパック:[/bold]")
         console.print(f"  使用: {gpu['used']}  未使用: {gpu['unused']}")
 
     # ストレージ情報
@@ -119,8 +115,7 @@ def summary_cmd(
 @app.command("select")
 def select_cmd() -> None:
     """使用するプロジェクトを選択して保存する"""
-    settings = Settings()
-    store = CredentialStore(config_dir=settings.config_dir)
+    store = get_store()
     client = get_client()
     orgs = list_projects(client)
 
@@ -137,26 +132,16 @@ def select_cmd() -> None:
     stop_active_spinner()
 
     if not all_projects:
-        console.print("[red]プロジェクトが見つかりません[/red]")
-        raise typer.Exit(code=1)
-
-    console.print()
-    for i, proj in enumerate(all_projects, 1):
-        name = proj.get("name", "")
-        uuid = proj.get("uuid", "")
-        console.print(f"  [bold]{i}[/bold]) {name} [dim]({uuid})[/dim]")
-    console.print()
+        fail("プロジェクトが見つかりません")
 
     current = store.load_project_id()
     if current:
-        console.print(f"  現在の選択: [dim]{current}[/dim]")
+        console.print(f"\n  現在の選択: [dim]{current}[/dim]")
 
-    choice = int(questionary.text("番号を入力:").unsafe_ask())
-    if choice < 1 or choice > len(all_projects):
-        console.print("[red]無効な番号です[/red]")
-        raise typer.Exit(code=1)
-
-    selected = all_projects[choice - 1]
+    selected = select_from_list(
+        all_projects,
+        lambda p: f"{p.get('name', '')} [dim]({p.get('uuid', '')})[/dim]",
+    )
     store.save_project_id(selected["uuid"])
     console.print(f"プロジェクトを選択しました: [bold]{selected['name']}[/bold]")
 

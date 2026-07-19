@@ -1,25 +1,20 @@
 import questionary
 import typer
-from rich.console import Console
 
 from mdx_cli.api.endpoints.auth import sso_login
-from mdx_cli.credentials.store import CredentialStore
-from mdx_cli.settings import Settings
+from mdx_cli.commands._common import fail
+from mdx_cli.console import console
+from mdx_cli.credentials.store import get_store
+from mdx_cli.settings import get_settings
 
 app = typer.Typer(no_args_is_help=True, help="認証管理")
-console = Console()
-
-
-def _get_store() -> CredentialStore:
-    settings = Settings()
-    return CredentialStore(config_dir=settings.config_dir)
 
 
 @app.command()
 def login() -> None:
     """MDX にログインする（Shibboleth SSO経由）"""
-    store = _get_store()
-    settings = Settings()
+    store = get_store()
+    settings = get_settings()
 
     # 保存済みID/PWがあればデフォルトに
     creds = store.load_credentials()
@@ -47,8 +42,7 @@ def login() -> None:
     )
 
     if token is None:
-        console.print("[red]ログインに失敗しました。認証情報を確認してください。[/red]")
-        raise typer.Exit(code=1)
+        fail("ログインに失敗しました。認証情報を確認してください。")
 
     store.save_credentials(username, password)
     store.save_token(token)
@@ -58,7 +52,7 @@ def login() -> None:
 @app.command()
 def logout() -> None:
     """ログアウトしてクレデンシャルを削除する"""
-    store = _get_store()
+    store = get_store()
     store.delete_token()
     store.delete_credentials()
     console.print("ログアウトしました")
@@ -67,7 +61,7 @@ def logout() -> None:
 @app.command()
 def status() -> None:
     """認証状態を確認する"""
-    store = _get_store()
+    store = get_store()
     token = store.load_token()
     if token:
         creds = store.load_credentials()
