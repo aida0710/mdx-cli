@@ -80,6 +80,15 @@ def reset_vm(client: httpx.Client, vm_id: str) -> None:
     resp.raise_for_status()
 
 
+def rename_vm(client: httpx.Client, vm_id: str, new_name: str) -> str:
+    resp = client.post(f"/api/vm/{vm_id}/rename/", json={"vm_name": new_name})
+    resp.raise_for_status()
+    task_id = resp.json().get("task_id", "")
+    if isinstance(task_id, list):
+        task_id = task_id[0]
+    return task_id
+
+
 def reconfigure_vm(client: httpx.Client, vm_id: str, config: dict) -> str:
     """VM構成変更。VMは停止状態である必要がある。
 
