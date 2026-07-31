@@ -42,6 +42,33 @@ def test_load_credentials_when_none_saved(tmp_path, mocker):
     result = store.load_credentials()
     assert result is None
 
+def test_load_token_returns_none_for_broken_json(tmp_path):
+    """壊れた token.json はクラッシュせず未保存扱いにする（再ログインで自己修復）。"""
+    store = CredentialStore(config_dir=tmp_path)
+    (tmp_path / "token.json").write_text("{broken")
+    assert store.load_token() is None
+
+
+def test_load_project_id_returns_none_for_broken_json(tmp_path):
+    """壊れた project.json も同様に未保存扱いにする。"""
+    store = CredentialStore(config_dir=tmp_path)
+    (tmp_path / "project.json").write_text("not json at all")
+    assert store.load_project_id() is None
+
+
+def test_keyring_available_is_cached(mocker):
+    """keyring の疎通確認は初回のみ実行する（毎回叩くとバックエンドが遅い）。"""
+    from mdx_cli.credentials import store as store_mod
+
+    mock_keyring = mocker.MagicMock()
+    mocker.patch.dict("sys.modules", {"keyring": mock_keyring})
+    store_mod.keyring_available.cache_clear()
+
+    assert store_mod.keyring_available() is True
+    assert store_mod.keyring_available() is True
+    assert mock_keyring.get_password.call_count == 1
+
+
 def test_get_store_returns_same_instance(monkeypatch, tmp_path):
     """get_store() はキャッシュされた同一インスタンスを返す"""
     from mdx_cli.credentials.store import get_store

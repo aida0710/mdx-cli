@@ -15,7 +15,14 @@ from mdx_cli.api.endpoints.vms import (
     sync_vms,
     vm_action_path,
 )
-from mdx_cli.api.parallel import parallel_get, parallel_poll, parallel_post, parallel_wait
+from mdx_cli.api.parallel import (
+    MAX_CONCURRENT_CSV,
+    MAX_CONCURRENT_VM_DETAIL,
+    parallel_get,
+    parallel_poll,
+    parallel_post,
+    parallel_wait,
+)
 from mdx_cli.api.spinner import progress_status, stop_active_spinner
 from mdx_cli.commands._common import (
     fail,
@@ -442,6 +449,7 @@ def _fetch_vm_details(client, vms_brief: list) -> list:
     with progress_status("詳細取得中", len(vms_brief)) as progress:
         results = parallel_get(
             base_url, token, paths,
+            max_concurrent=MAX_CONCURRENT_VM_DETAIL,
             on_progress=lambda idx: progress.advance(vms_brief[idx].name),
             return_exceptions=True,
         )
@@ -482,7 +490,7 @@ def _wait_for_poweroff(running_vms: list, poll_interval: int = 5, max_polls: int
             is_done=lambda data: data.get("status") != "PowerON",
             poll_interval=poll_interval,
             max_polls=max_polls,
-            max_concurrent=8,  # VM詳細APIは遅いため低並列に抑える
+            max_concurrent=MAX_CONCURRENT_VM_DETAIL,
             on_done=lambda i: progress.advance(f"完了: {running_vms[i].name}"),
         )
 
@@ -1096,7 +1104,11 @@ def ssh(
     ipv4_list = net.get("ipv4_address", [])
     private_ip = ipv4_list[0] if ipv4_list else ""
 
-    if use_global_ip and global_ip:
+    if use_global_ip:
+        # --global を明示している以上、黙って内部IPに落とさない
+        # （別経路で繋がると疎通できたと誤認させるため）
+        if not global_ip:
+            fail("グローバルIPが割り当てられていません（内部IPで接続するには --global を外してください）")
         host = global_ip
     elif private_ip:
         host = private_ip
@@ -1177,11 +1189,27 @@ def csv(
     paths = [f"/api/vm/{v.uuid}/csv/" for v in vms]
     with progress_status("CSV取得中", len(vms)) as progress:
         results = parallel_get(
-            base_url, token, paths, max_concurrent=50,
+            base_url, token, paths, max_concurrent=MAX_CONCURRENT_CSV,
             on_progress=lambda idx: progress.advance(),
+            return_exceptions=True,
         )
 
-    rows = [_vm_csv_row(data) for data in results]
+    rows = []
+    failed = []
+    for vm, data in zip(vms, results):
+        if isinstance(data, Exception):
+            failed.append(vm)
+            continue
+        rows.append(_vm_csv_row(data))
+
+    if failed:
+        console.print(
+            f"[yellow]※ {len(failed)}台のCSV取得に失敗しました（リトライ後も失敗・サーバー負荷の可能性）:[/yellow]"
+        )
+        for v in failed:
+            console.print(f"  - {v.name} [dim]({v.uuid})[/dim]")
+    if not rows:
+        fail("CSVを取得できたVMがありません")
 
     # CSV生成
     buf = io.StringIO()
@@ -1193,6 +1221,6 @@ def csv(
     if output:
         out_path = Path(output).expanduser()
         out_path.write_text(csv_text)
-        console.print(f"[green]{len(vms)}台のVM情報を {out_path} に保存しました[/green]")
+        console.print(f"[green]{len(rows)}台のVM情報を {out_path} に保存しました[/green]")
     else:
         print(csv_text, end="")
