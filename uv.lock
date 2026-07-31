@@ -331,7 +331,7 @@ wheels = [
 
 [[package]]
 name = "mdx-cli"
-version = "1.0.0"
+version = "1.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
