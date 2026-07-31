@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,7 +11,11 @@ class Settings(BaseSettings):
     request_timeout: int = 120
     task_poll_interval: int = 3
     task_poll_timeout: int = 600
-    config_dir: Path = Path.home() / ".config" / "mdx-cli"
+    # クラス定義時に Path.home() を評価するとimport時点のHOMEで固定されるため
+    # default_factory でインスタンス生成時に解決する。
+    config_dir: Path = Field(
+        default_factory=lambda: Path.home() / ".config" / "mdx-cli"
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="MDX_",

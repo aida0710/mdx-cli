@@ -78,6 +78,26 @@ def test_cli_formats_connect_error(capsys):
     assert "VPN" in capsys.readouterr().err
 
 
+def test_cli_formats_other_httpx_errors(capsys):
+    """ReadError 等の httpx エラーもトレースバックを出さずに終了する。
+
+    ConnectError / TimeoutException / HTTPStatusError だけを捕捉していると
+    ReadError・RemoteProtocolError・ProxyError が素のトレースバックになる。
+    """
+    from unittest.mock import patch
+
+    import httpx
+    import pytest
+
+    from mdx_cli.main import cli
+
+    with patch("mdx_cli.main.app", side_effect=httpx.RemoteProtocolError("broken")):
+        with pytest.raises(SystemExit) as exc_info:
+            cli()
+    assert exc_info.value.code == 1
+    assert "broken" in capsys.readouterr().err
+
+
 def test_cli_passes_through_normal_exit():
     """正常終了はそのまま（--help 等）。"""
     from unittest.mock import patch

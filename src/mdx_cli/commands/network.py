@@ -14,7 +14,7 @@ from mdx_cli.api.endpoints.networks import (
     list_segments,
 )
 from mdx_cli.api.endpoints.vms import list_vms
-from mdx_cli.api.parallel import parallel_get
+from mdx_cli.api.parallel import MAX_CONCURRENT_VM_DETAIL, parallel_get
 from mdx_cli.api.spinner import progress_status, stop_active_spinner
 from mdx_cli.commands._common import (
     get_auth_context,
@@ -62,8 +62,7 @@ def _collect_vm_ip_maps(client, pid: str, json_mode: bool) -> VmIpMaps:
     with progress_status("VM詳細を取得中", len(active_vms), enabled=not json_mode) as progress:
         results = parallel_get(
             base_url, token, paths,
-            # VM詳細APIは応答が遅く、高並列だと過負荷でタイムアウトが多発するため低めに抑える
-            max_concurrent=8,
+            max_concurrent=MAX_CONCURRENT_VM_DETAIL,
             on_progress=lambda idx: progress.advance(),
             return_exceptions=True,
         )
