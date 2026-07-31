@@ -18,7 +18,7 @@ usage() {
 Install mdx-cli skills into Codex and/or Claude Code.
 
 Usage:
-  sh codebot-skill-install.sh [options]
+  sh agent-skill-install.sh [options]
 
 Options:
   --codex-only        Install only to Codex
