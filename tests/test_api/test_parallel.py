@@ -208,6 +208,41 @@ def test_parallel_wait_retries_on_timeout():
 
 
 @respx.mock
+def test_parallel_wait_releases_semaphore_while_sleeping():
+    """待機中のタスクがセマフォを占有し続けない。
+
+    セマフォをポーリングループ全体で保持すると、max_concurrent を超えた分の
+    タスクは先行タスクが完了するまでポーリングを開始できず、待機がシリアル化
+    する（10台デプロイで進捗が5台で止まって見え、所要時間が倍になる）。
+    sleep 中はセマフォを解放し、他タスクのポーリング周期を止めない。
+    """
+    respx.get("https://oprpl.mdx.jp/api/task/task-1/").mock(
+        side_effect=[
+            httpx.Response(200, json={"status": "Running"}),
+            httpx.Response(200, json={"status": "Running"}),
+            httpx.Response(200, json={"status": "Completed"}),
+        ]
+    )
+    respx.get("https://oprpl.mdx.jp/api/task/task-2/").mock(
+        return_value=httpx.Response(200, json={"status": "Completed"})
+    )
+
+    parallel_wait(
+        base_url="https://oprpl.mdx.jp",
+        token="test-token",
+        task_ids=["task-1", "task-2"],
+        poll_interval=0,
+        timeout=10,
+        max_concurrent=1,
+    )
+
+    paths = [c.request.url.path for c in respx.calls]
+    t1_last = len(paths) - 1 - paths[::-1].index("/api/task/task-1/")
+    t2_first = paths.index("/api/task/task-2/")
+    assert t2_first < t1_last, f"task-2 が task-1 の完了を待たされている: {paths}"
+
+
+@respx.mock
 def test_parallel_wait_404_eventually_returns_unknown():
     """404 が一定回数続いたら諦めてエラーなく抜ける（無限ループ防止）。"""
     respx.get("https://oprpl.mdx.jp/api/task/task-bad/").mock(
