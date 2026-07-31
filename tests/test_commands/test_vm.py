@@ -942,3 +942,72 @@ def test_vm_ssh_uses_global_ip_with_flag():
 
     assert result.exit_code == 0, result.output
     mock_exec.assert_called_once_with("ssh", ["ssh", "mdxuser@203.0.113.7"])
+
+
+def test_vm_ssh_global_flag_without_global_ip_fails():
+    """--global を明示したのに global_ip が無ければ、黙って内部IPに落とさず失敗する。
+
+    グローバル経由で繋ぐ意図で指定しているので、静かに別経路へ繋ぐと
+    「繋がったから通っている」と誤認させる。
+    """
+    brief = _make_vm("web-1", "uuid-net")
+    detail = VM.model_validate({
+        "uuid": "uuid-net",
+        "name": "web-1",
+        "status": "PowerON",
+        "service_networks": [{
+            "adapter_number": 1,
+            "ipv4_address": ["10.15.0.7"],
+            "global_ip": "",
+        }],
+    })
+
+    with patch("mdx_cli.commands.vm.list_vms", return_value=[brief]), \
+         patch("mdx_cli.commands.vm.get_vm", return_value=detail), \
+         patch("mdx_cli.commands.vm.get_client"), \
+         patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"), \
+         patch("os.execvp") as mock_exec:
+        result = runner.invoke(app, ["ssh", "web-1", "-p", "proj-1", "--global"])
+
+    assert result.exit_code != 0
+    mock_exec.assert_not_called()
+
+
+def test_vm_csv_survives_partial_failure():
+    """1台の取得に失敗しても残りはCSV出力し、失敗分を警告する。
+
+    _fetch_vm_details と同じく部分失敗で全体を落とさない。
+    """
+    import httpx
+
+    vms = [_make_vm("vm-a", "uuid-a"), _make_vm("vm-b", "uuid-b")]
+    req = httpx.Request("GET", "https://oprpl.mdx.jp/api/vm/uuid-b/csv/")
+    err = httpx.HTTPStatusError(
+        "boom", request=req, response=httpx.Response(500, request=req)
+    )
+
+    with patch("mdx_cli.commands.vm.list_vms", return_value=vms), \
+         patch("mdx_cli.commands.vm.get_client"), \
+         patch("mdx_cli.commands.vm.parallel_get", return_value=[{"name": "vm-a"}, err]):
+        result = runner.invoke(app, ["csv", "-p", "proj-1"])
+
+    assert result.exit_code == 0, result.output
+    assert "vm-a" in result.output
+    assert "vm-b" in result.output
+
+
+def test_fetch_vm_details_uses_vm_detail_concurrency():
+    """VM詳細の並列取得は専用の低並列度を使う（/api/vm/{uuid}/ は遅い）。"""
+    from mdx_cli.api.parallel import MAX_CONCURRENT_VM_DETAIL
+    from mdx_cli.commands.vm import _fetch_vm_details
+
+    vms = [_make_vm("a", "uuid-a"), _make_vm("b", "uuid-b")]
+    details = [
+        {"name": v.name, "status": v.status, "service_level": v.service_level}
+        for v in vms
+    ]
+    with patch("mdx_cli.commands.vm.parallel_get", return_value=details) as mock_get, \
+         patch("mdx_cli.commands.vm.get_auth_context", return_value=("tok", "url")):
+        _fetch_vm_details(None, vms)
+
+    assert mock_get.call_args.kwargs["max_concurrent"] == MAX_CONCURRENT_VM_DETAIL

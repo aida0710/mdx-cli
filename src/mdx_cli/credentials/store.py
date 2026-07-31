@@ -10,7 +10,13 @@ from cryptography.fernet import Fernet
 SERVICE_NAME = "mdx-cli"
 
 
+@lru_cache
 def keyring_available() -> bool:
+    """keyringバックエンドが使えるか判定する。
+
+    バックエンドによっては疎通確認自体が遅いため、プロセス内でキャッシュする。
+    テストで差し替える場合は cache_clear() を呼ぶこと。
+    """
     try:
         import keyring
         keyring.get_password(SERVICE_NAME, "__test__")
@@ -83,11 +89,7 @@ class CredentialStore:
         os.chmod(token_file, 0o600)
 
     def load_token(self) -> str | None:
-        token_file = self._config_dir / "token.json"
-        if not token_file.exists():
-            return None
-        data = json.loads(token_file.read_text())
-        return data.get("token")
+        return self._read_json_field(self._config_dir / "token.json", "token")
 
     def delete_token(self) -> None:
         token_file = self._config_dir / "token.json"
@@ -100,11 +102,23 @@ class CredentialStore:
         os.chmod(project_file, 0o600)
 
     def load_project_id(self) -> str | None:
-        project_file = self._config_dir / "project.json"
-        if not project_file.exists():
+        return self._read_json_field(self._config_dir / "project.json", "project_id")
+
+    @staticmethod
+    def _read_json_field(path: Path, key: str) -> str | None:
+        """JSONファイルから1フィールドを読む。
+
+        未作成・破損・読み取り不可はいずれも None（未保存扱い）にする。
+        壊れたファイルでコマンド全体をクラッシュさせず、再ログイン・再選択で
+        自己修復できるようにするため。
+        """
+        if not path.exists():
             return None
-        data = json.loads(project_file.read_text())
-        return data.get("project_id")
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            return None
+        return data.get(key) if isinstance(data, dict) else None
 
     def _save_credentials_fernet(self, username: str, password: str) -> None:
         key = _derive_key(self._config_dir)

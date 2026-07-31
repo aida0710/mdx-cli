@@ -6,6 +6,7 @@ GET / POST / タスク待機に対応。リトライ付き。
 
 import asyncio
 import logging
+import time
 from typing import Callable
 
 import httpx
@@ -14,6 +15,10 @@ from mdx_cli.settings import get_settings
 logger = logging.getLogger("mdx_cli")
 
 MAX_CONCURRENT_GET = 30
+# /api/vm/{uuid}/ は応答が遅く、高並列にするとタイムアウトと再試行が増える。
+MAX_CONCURRENT_VM_DETAIL = 8
+# /api/vm/{uuid}/csv/ は軽量なので高並列で取り切れる。
+MAX_CONCURRENT_CSV = 50
 MAX_CONCURRENT_POST = 5
 MAX_RETRIES = 3
 RETRY_BACKOFF = [1, 2, 4]  # 秒
@@ -225,44 +230,47 @@ async def _wait_one(
     deploy 直後の task_id はサーバー側登録の遅延で 404 を返すことがある
     （並行プロセスが refresh するとさらに発生しやすい）。
     404 は一時エラーとして扱い、リトライを続ける（タイムアウトで諦める）。
+
+    セマフォはリクエスト中のみ保持し、sleep中は解放する（_poll_one と同じ）。
+    ループ全体で保持すると max_concurrent を超えた分のタスクが先行タスクの
+    完了までポーリングを開始できず、待機がシリアル化する。
     """
-    async with semaphore:
-        import time
-        start = time.monotonic()
-        last_data: dict = {}
-        while True:
-            try:
+    start = time.monotonic()
+    last_data: dict = {}
+    while True:
+        try:
+            async with semaphore:
                 resp = await client.get(f"/api/task/{task_id}/")
-            except (httpx.ConnectError, httpx.TimeoutException) as e:
-                # ネットワーク一時エラー → タイムアウトまでポーリングを継続
-                if time.monotonic() - start >= timeout:
-                    if on_done:
-                        on_done(task_id, last_data)
-                    return last_data
-                logger.debug("task %s poll failed (%s), retry", task_id, e)
-                await asyncio.sleep(poll_interval)
-                continue
-            if resp.status_code == 404:
-                # タスクがまだ登録されてない or トークン競合 → リトライ
-                if time.monotonic() - start >= timeout:
-                    if on_done:
-                        on_done(task_id, last_data)
-                    return last_data
-                await asyncio.sleep(poll_interval)
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            last_data = data
-            status = data.get("status", "")
-            if status in ("Completed", "Failed"):
-                if on_done:
-                    on_done(task_id, data)
-                return data
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            # ネットワーク一時エラー → タイムアウトまでポーリングを継続
             if time.monotonic() - start >= timeout:
                 if on_done:
-                    on_done(task_id, data)
-                return data
+                    on_done(task_id, last_data)
+                return last_data
+            logger.debug("task %s poll failed (%s), retry", task_id, e)
             await asyncio.sleep(poll_interval)
+            continue
+        if resp.status_code == 404:
+            # タスクがまだ登録されてない or トークン競合 → リトライ
+            if time.monotonic() - start >= timeout:
+                if on_done:
+                    on_done(task_id, last_data)
+                return last_data
+            await asyncio.sleep(poll_interval)
+            continue
+        resp.raise_for_status()
+        data = resp.json()
+        last_data = data
+        status = data.get("status", "")
+        if status in ("Completed", "Failed"):
+            if on_done:
+                on_done(task_id, data)
+            return data
+        if time.monotonic() - start >= timeout:
+            if on_done:
+                on_done(task_id, data)
+            return data
+        await asyncio.sleep(poll_interval)
 
 
 def parallel_wait(

@@ -78,7 +78,7 @@ fail("VM が見つかりません")  # 赤字表示して typer.Exit(code=1)
 `create_client(silent=False)` で作成したクライアントは、全リクエストで自動的にスピナーが表示される。`--json` 時は `silent=True` で非表示。結果表示前に `stop_active_spinner()` で停止。
 
 ```python
-client = _get_client(silent=json)  # --json 時はスピナー非表示
+client = get_client(silent=json)  # --json 時はスピナー非表示
 data = list_vms(client, pid)
 render(data, VM_COLUMNS, json_mode=json)  # render() 内で自動停止
 ```
