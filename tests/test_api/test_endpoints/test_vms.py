@@ -1,7 +1,15 @@
 import httpx
 import respx
 
-from mdx_cli.api.endpoints.vms import list_vms, get_vm, deploy_vm, power_on_vm, power_off_vm, destroy_vm
+from mdx_cli.api.endpoints.vms import (
+    deploy_vm,
+    destroy_vm,
+    get_vm,
+    list_vms,
+    power_off_vm,
+    power_on_vm,
+    rename_vm,
+)
 from mdx_cli.models.vm import VMDeployRequest
 
 
@@ -88,6 +96,31 @@ def test_destroy_vm():
     client = httpx.Client(base_url="https://oprpl.mdx.jp")
     resp = destroy_vm(client, "vm-1")
     assert resp.task_id == ["task-del"]
+
+@respx.mock
+def test_rename_vm_with_string_task_id():
+    route = respx.post("/api/vm/vm-1/rename/").mock(
+        return_value=httpx.Response(202, json={"task_id": "task-rename"})
+    )
+    client = httpx.Client(base_url="https://oprpl.mdx.jp")
+
+    task_id = rename_vm(client, "vm-1", "renamed-vm")
+
+    assert task_id == "task-rename"
+    assert route.calls.last.request.content == b'{"vm_name":"renamed-vm"}'
+
+
+@respx.mock
+def test_rename_vm_with_list_task_id():
+    respx.post("/api/vm/vm-1/rename/").mock(
+        return_value=httpx.Response(202, json={"task_id": ["task-rename"]})
+    )
+    client = httpx.Client(base_url="https://oprpl.mdx.jp")
+
+    task_id = rename_vm(client, "vm-1", "renamed-vm")
+
+    assert task_id == "task-rename"
+
 
 def test_vm_action_path():
     """VM操作APIのパスを一元的に構築する。"""
