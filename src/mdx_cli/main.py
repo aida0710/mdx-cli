@@ -57,6 +57,11 @@ def cli() -> None:
         stop_active_spinner()
         err_console.print(f"[red]リクエストがタイムアウトしました: {e}[/red]")
         raise SystemExit(1)
+    except httpx.HTTPError as e:
+        # ReadError / RemoteProtocolError / ProxyError 等の取りこぼし
+        stop_active_spinner()
+        err_console.print(f"[red]通信エラー: {type(e).__name__}: {e}[/red]")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

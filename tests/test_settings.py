@@ -34,6 +34,16 @@ def test_env_override(monkeypatch):
     assert settings.default_project_id == "test-project-123"
 
 
+def test_config_dir_follows_home_at_instantiation(monkeypatch, tmp_path):
+    """config_dir のデフォルトはインスタンス生成時のHOMEを見る。
+
+    クラス定義時に Path.home() を評価すると import 時点のHOMEで固定され、
+    実行中にHOMEが変わっても追従しない。
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert Settings().config_dir == tmp_path / ".config" / "mdx-cli"
+
+
 def test_get_settings_returns_same_instance():
     """get_settings() はキャッシュされた同一インスタンスを返す"""
     assert get_settings() is get_settings()
