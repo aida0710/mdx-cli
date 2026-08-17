@@ -1011,3 +1011,81 @@ def test_fetch_vm_details_uses_vm_detail_concurrency():
         _fetch_vm_details(None, vms)
 
     assert mock_get.call_args.kwargs["max_concurrent"] == MAX_CONCURRENT_VM_DETAIL
+
+
+# --- vm resources ---
+
+
+def _make_vm_resource_source(name="vm-1", disks=("40 GB", "100 GB")):
+    return VM.model_validate({
+        "uuid": f"uuid-{name}",
+        "name": name,
+        "status": "PowerON",
+        "service_level": "スポット仮想マシン",
+        "pack_type": "cpu",
+        "pack_num": 4,
+        "cpu": "4",
+        "memory": "6.0 GB",
+        "gpu": "-",
+        "hard_disks": [
+            {"disk_number": i + 1, "device_key": 2000 + i, "capacity": c}
+            for i, c in enumerate(disks)
+        ],
+    })
+
+
+def test_capacity_gb_parses_gb_string():
+    from mdx_cli.commands.vm import _capacity_gb
+    assert _capacity_gb({"capacity": "40 GB"}) == 40
+
+
+def test_capacity_gb_returns_zero_when_unparsable():
+    """容量が欠けていても集計を落とさない（extra="allow" のため形式は保証されない）。"""
+    from mdx_cli.commands.vm import _capacity_gb
+    assert _capacity_gb({}) == 0
+    assert _capacity_gb({"capacity": "unknown"}) == 0
+
+
+def test_vm_resources_json_reports_disk_total():
+    """VMごとにディスク内訳と合計GB、パック構成を出す。"""
+    vms = [_make_vm_resource_source("vm-1", disks=("40 GB", "100 GB"))]
+    with patch("mdx_cli.commands.vm.list_vms", return_value=vms), \
+         patch("mdx_cli.commands.vm._fetch_vm_details", return_value=vms), \
+         patch("mdx_cli.commands.vm.get_client"):
+        result = runner.invoke(app, ["resources", "-p", "proj-1", "--json"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data[0]["name"] == "vm-1"
+    assert data[0]["disks"] == "40 GB, 100 GB"
+    assert data[0]["total_gb"] == 140
+    assert data[0]["pack"] == "cpu x 4"
+    assert data[0]["memory"] == "6.0 GB"
+
+
+def test_vm_resources_filters_by_pattern():
+    """パターン指定で対象VMを絞り込む。"""
+    vms = [_make_vm_resource_source("crawler-0"), _make_vm_resource_source("web-0")]
+    with patch("mdx_cli.commands.vm.list_vms", return_value=vms), \
+         patch("mdx_cli.commands.vm._fetch_vm_details", side_effect=lambda _c, v: v), \
+         patch("mdx_cli.commands.vm.get_client"):
+        result = runner.invoke(app, ["resources", "crawler-*", "-p", "proj-1", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert [d["name"] for d in json.loads(result.output)] == ["crawler-0"]
+
+
+def test_vm_resources_prints_grand_total():
+    """テーブル表示では末尾に台数と総容量を出す（--json では出さない）。"""
+    vms = [
+        _make_vm_resource_source("vm-1", disks=("40 GB",)),
+        _make_vm_resource_source("vm-2", disks=("100 GB",)),
+    ]
+    with patch("mdx_cli.commands.vm.list_vms", return_value=vms), \
+         patch("mdx_cli.commands.vm._fetch_vm_details", return_value=vms), \
+         patch("mdx_cli.commands.vm.get_client"):
+        result = runner.invoke(app, ["resources", "-p", "proj-1"])
+
+    assert result.exit_code == 0, result.output
+    assert "2台" in result.output
+    assert "140 GB" in result.output

@@ -42,8 +42,9 @@ from mdx_cli.commands._name_pattern import (
 )
 from mdx_cli.console import console
 from mdx_cli.models.pack import PACK_SPECS, pack_choice_label
+from mdx_cli.models.vm import VMResource
 from mdx_cli.output.formatting import render, render_json
-from mdx_cli.output.tables import VM_COLUMNS
+from mdx_cli.output.tables import VM_COLUMNS, VM_RESOURCE_COLUMNS
 from mdx_cli.settings import get_settings
 
 app = typer.Typer(no_args_is_help=True, help="仮想マシン管理")
@@ -472,6 +473,15 @@ def _fetch_vm_details(client, vms_brief: list) -> list:
             console.print(f"  - {v.name} [dim]({v.uuid})[/dim]")
 
     return vms_detail
+
+
+def _capacity_gb(disk: dict) -> int:
+    """ディスクの capacity（"40 GB" 等）をGB整数に変換する。解釈できなければ0。"""
+    raw = str(disk.get("capacity", "")).replace("GB", "").strip()
+    try:
+        return int(float(raw))
+    except ValueError:
+        return 0
 
 
 def _wait_for_poweroff(running_vms: list, poll_interval: int = 5, max_polls: int = 60) -> list:
@@ -932,11 +942,7 @@ def reconfigure(
     # ディスク新容量（代表VMの各ディスク分を聞き、全VMに同一適用）
     new_capacities: list[int] = []
     for d in ref_disks:
-        current_cap = d.get("capacity", "").replace(" GB", "").strip()
-        try:
-            current_cap_int = int(float(current_cap))
-        except (ValueError, TypeError):
-            current_cap_int = 40
+        current_cap_int = _capacity_gb(d) or 40
         new_cap = prompt_int(
             f"ディスク #{d.get('disk_number', '?')} (GB):",
             default=str(current_cap_int),
@@ -1141,6 +1147,48 @@ def ssh(
 
 
 # CSV用のヘッダー（Webポータルと同じ列構成）
+def _vm_resource(vm) -> VMResource:
+    """VM詳細からリソース集計行を作る。"""
+    extra = getattr(vm, "model_extra", {}) or {}
+    disks = vm.hard_disks
+    return VMResource(
+        name=vm.name,
+        status=vm.status,
+        pack=f"{vm.pack_type or '-'} x {vm.pack_num if vm.pack_num is not None else '-'}",
+        cpu=str(extra.get("cpu", "-")),
+        memory=str(extra.get("memory", "-")),
+        gpu=str(extra.get("gpu", "-")),
+        disks=", ".join(str(d.get("capacity", "?")) for d in disks),
+        total_gb=sum(_capacity_gb(d) for d in disks),
+    )
+
+
+@app.command()
+def resources(
+    target: str = typer.Argument(None, help="VM名パターン（省略時は全VM）"),
+    project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
+    json: bool = typer.Option(False, "--json", help="JSON出力"),
+) -> None:
+    """VMごとのリソース一覧（パック・CPU・メモリ・GPU・ディスク容量）"""
+    client = get_client(silent=json)
+
+    if target:
+        vms_brief = _resolve_vms(client, target, project_id)
+    else:
+        vms_brief = list_vms(client, resolve_project_id(project_id))
+        stop_active_spinner()
+        if not vms_brief:
+            fail("VMがありません")
+
+    rows = [_vm_resource(v) for v in _fetch_vm_details(client, vms_brief)]
+    if not rows:
+        fail("リソース情報を取得できたVMがありません")
+
+    render(rows, VM_RESOURCE_COLUMNS, json_mode=json)
+    if not json:
+        console.print(f"合計: {len(rows)}台 / {sum(r.total_gb for r in rows)} GB")
+
+
 _CSV_HEADER = ["VM_NAME"]
 for _i in range(1, 9):
     _CSV_HEADER.extend([f"SERVICE_NET_{_i}_IPv4", f"SERVICE_NET_{_i}_IPv6"])
