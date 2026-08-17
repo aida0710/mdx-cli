@@ -10,6 +10,17 @@ VM_COLUMNS: list[tuple[str, str]] = [
     ("サービスレベル", "service_level"),
 ]
 
+VM_RESOURCE_COLUMNS: list[tuple[str, str]] = [
+    ("名前", "name"),
+    ("状態", "status"),
+    ("パック", "pack"),
+    ("CPU", "cpu"),
+    ("メモリ", "memory"),
+    ("GPU", "gpu"),
+    ("ディスク", "disks"),
+    ("合計(GB)", "total_gb"),
+]
+
 PROJECT_COLUMNS: list[tuple[str, str]] = [
     ("UUID", "uuid"),
     ("名前", "name"),
