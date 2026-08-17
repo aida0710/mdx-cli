@@ -20,6 +20,19 @@ class VM(BaseModel):
     storage_networks: list[dict] = Field(default_factory=list)
 
 
+class VMResource(BaseModel):
+    """VMごとのリソース集計（vm resources の表示用）"""
+
+    name: str
+    status: str
+    pack: str  # "cpu x 4"
+    cpu: str
+    memory: str
+    gpu: str
+    disks: str  # "40 GB, 100 GB"
+    total_gb: int
+
+
 class VMDeployRequest(BaseModel):
     catalog: str
     project: str
