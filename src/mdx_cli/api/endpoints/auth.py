@@ -1,5 +1,6 @@
 import logging
 import re
+from collections.abc import Callable
 from urllib.parse import urljoin
 
 import httpx
@@ -50,7 +51,7 @@ def sso_login(
     base_url: str,
     username: str,
     password: str,
-    otp: str,
+    otp: str | Callable[[], str],
     timeout: int = 60,
 ) -> str | None:
     """Shibboleth SSOフローを辿ってJWTトークンを取得する。
@@ -61,6 +62,8 @@ def sso_login(
       - totp: TOTP入力
       - consent: 属性同意（グローバル同意で自動承認）
       - saml: SAMLResponse送信
+
+    otp に関数を渡した場合は、TOTPフォームを送信する直前に呼び出す。
     """
     session = httpx.Client(
         follow_redirects=True,
@@ -134,7 +137,7 @@ def sso_login(
 
             elif form_type == "totp":
                 # TOTPフォーム: OTPを入力
-                fields["j_tokenNumber"] = otp
+                fields["j_tokenNumber"] = otp() if callable(otp) else otp
                 logger.debug("Step %d: TOTP送信 → %s", step, action)
                 resp = session.post(action, data=fields)
 

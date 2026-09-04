@@ -331,7 +331,7 @@ wheels = [
 
 [[package]]
 name = "mdx-cli"
-version = "1.7.0"
+version = "2.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -362,7 +362,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "questionary", specifier = ">=2.0" },
-    { name = "typer", extras = ["all"], specifier = ">=0.12" },
+    { name = "typer", specifier = ">=0.12" },
 ]
 
 [package.metadata.requires-dev]

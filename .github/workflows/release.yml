@@ -7,10 +7,50 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  verify:
+    name: Verify source
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Run tests
+        run: uv run --no-sync pytest -q
+
+      - name: Run lint
+        run: uv run --no-sync ruff check .
+
+      # タグ v2.0.0 と pyproject / __version__ がズレたまま公開すると、
+      # 配布バイナリの mdx --version と Release の表示が食い違う。
+      - name: タグとバージョンの一致を確認
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "タグ以外の実行のため検証をスキップします"
+            exit 0
+          fi
+          tag="${GITHUB_REF_NAME#v}"
+          pyproject=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          module=$(grep -m1 '^__version__ = ' src/mdx_cli/__init__.py | cut -d'"' -f2)
+          echo "tag=$tag pyproject=$pyproject __version__=$module"
+          if [ "$tag" != "$pyproject" ] || [ "$tag" != "$module" ]; then
+            echo "::error::タグ $GITHUB_REF_NAME と version が一致しません"
+            exit 1
+          fi
+
   build:
+    needs: verify
     strategy:
       matrix:
         include:
@@ -24,14 +64,14 @@ jobs:
             artifact: mdx-windows-x86_64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v10
 
       - name: Install dependencies
         run: uv sync --group dev
@@ -47,16 +87,25 @@ jobs:
         if: runner.os == 'Windows'
         run: mv dist/mdx.exe dist/${{ matrix.artifact }}.exe
 
+      # 壊れたバイナリをそのまま公開しないよう、起動できることだけ確かめる
+      - name: Smoke test (Unix)
+        if: runner.os != 'Windows'
+        run: ./dist/${{ matrix.artifact }} --version
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        run: ./dist/${{ matrix.artifact }}.exe --version
+
       - name: Upload artifact (Unix)
         if: runner.os != 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
 
       - name: Upload artifact (Windows)
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}.exe
@@ -65,16 +114,31 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      # install.sh / install.ps1 も同じタグの内容をリリースに添付する
+      - uses: actions/checkout@v7
+
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
 
+      - name: Generate checksums.txt
+        run: |
+          cd artifacts
+          sha256sum mdx-* > ../checksums.txt
+          mv ../checksums.txt .
+          cat checksums.txt
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: false
           generate_release_notes: true
-          files: artifacts/*
+          files: |
+            artifacts/*
+            install.sh
+            install.ps1

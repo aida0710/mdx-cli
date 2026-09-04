@@ -9,13 +9,61 @@ Web ポータル (oprpl.mdx.jp) の操作をコマンドラインから実行で
 ## 前提条件
 
 - **MDX内部ネットワークからの実行が必要です。** MDX VPN 接続中、または MDX VM 上から実行してください。`oprpl.mdx.jp` および `mdxidm.mdx.jp` への疎通が必要です。
-- Python 3.13+
-- [uv](https://docs.astral.sh/uv/)
+- ソースから入れる場合のみ Python 3.13+ と [uv](https://docs.astral.sh/uv/)（バイナリは単体で動きます）
 
 ## インストール
 
+### uv版からバイナリ版へ切り替える場合
+
+これまで `uv tool install .` で導入していた場合は、uv の実行リンクと単体バイナリが
+競合しないよう、先にuv版を削除します。`~/.config/mdx-cli` の設定・認証情報は残ります。
+
+```bash
+uv tool uninstall mdx-cli
+```
+
+削除後、以下のOS別インストーラを実行してください。インストーラもuv版を検出した場合は
+上書きせず、この移行手順を案内して終了します。
+
+### バイナリ（推奨）
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://github.com/aida0710/mdx-cli/releases/latest/download/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://github.com/aida0710/mdx-cli/releases/latest/download/install.ps1 | iex
+```
+
+- 置き先は root なら `/usr/local/bin`、それ以外は `~/.local/bin`（Windows は `%LOCALAPPDATA%\Programs\mdx`）。`MDX_INSTALL_DIR` で変更できます
+- 版を固定する場合は、macOS / Linux では
+  `curl -fsSL https://github.com/aida0710/mdx-cli/releases/latest/download/install.sh | MDX_VERSION=v2.0.0 sh`、
+  Windows では実行前に `$env:MDX_VERSION = 'v2.0.0'` を設定します
+- リリースの `checksums.txt` で SHA-256 を照合し、取得不能・不一致ならインストールしません
+- アップデートは同じコマンドの再実行
+- 配布しているのは macOS(arm64) / Linux(x86_64, arm64) / Windows(x86_64) です
+
+### ソースから（uv）
+
 ```bash
 uv tool install .
+```
+
+アップデート:
+
+```bash
+git pull
+uv tool install . --force
+```
+
+インストール後の確認:
+
+```bash
+mdx --version
 ```
 
 ## Skill としてインストール
@@ -30,13 +78,6 @@ curl -fsSL https://raw.githubusercontent.com/aida0710/mdx-cli/main/agent-skill-i
 
 ```bash
 sh agent-skill-install.sh --source . --codex-only
-```
-
-### アップデート
-
-```bash
-git pull
-uv tool install . --force
 ```
 
 ## クイックスタート
@@ -82,13 +123,44 @@ Shibboleth SSO 経由でログインします。ユーザー名・パスワー�
 
 ```bash
 mdx auth login     # ログイン
+mdx auth otp       # TOTPシークレットを登録（OTP自動入力）
 mdx auth status    # 認証状態を確認
 mdx auth logout    # ログアウト（全クレデンシャル削除）
 ```
 
 - ユーザー名とパスワードは keyring（macOS Keychain 等）に保存
-- 2回目以降のログインは OTP の入力のみ
-- トークン期限切れ時は自動で再ログイン（OTP だけプロンプト）
+- 2回目以降のログインは保存済みユーザーをそのまま使い、OTP の入力のみ
+  （別ユーザーに切り替える場合は `mdx auth logout` してから `mdx auth login`）
+- トークン期限切れ時は自動で再ログイン（TOTP登録済みなら入力不要、未登録ならOTPだけプロンプト）
+
+### OTP の自動入力
+
+ログイン後に `mdx auth otp` で認証アプリと同じ TOTP シークレット（Base32）を登録すると、
+ログイン・再ログイン時の OTP 入力が不要になります。
+
+```bash
+mdx auth login          # 先にログイン（シークレットはこのアカウントに紐付く）
+mdx auth otp            # 未登録なら登録、登録済みなら「登録し直す / 削除する」を選択
+mdx auth otp --delete   # 登録を解除して手入力に戻す（確認あり）
+```
+
+シークレット入力は非表示です。続いて認証アプリ側の現在のOTPを入力し、ローカルで一致を確認します。
+CLIが生成したOTPは画面やログへ出しません。
+
+Web/IPMIコンソールなどで `questionary` のraw modeが使えない場合は、権限を制限したファイルまたは
+安全なパイプからシークレットを渡せます。標準入力がTTYの場合は、シークレットの画面表示を防ぐため拒否します。
+
+```bash
+mdx auth otp --non-interactive < /path/to/totp-secret
+```
+
+入力はBase32シークレット1行です。登録後、`mdx auth login` で自動生成OTPが通ることを確認してください。
+非対話で削除する場合は `mdx auth otp --delete --non-interactive` を使います。
+
+- シークレットは登録時のユーザー名とセットで保存され、そのアカウントのログイン時だけ使われます
+  （別ユーザーでログインする場合は自動入力されず、OTP の手入力に戻ります）
+- 保存先は ID/PW と同じ keyring（不可の場合は暗号化ファイル）で、`mdx auth logout` でまとめて削除されます
+- 同じ端末にパスワードと第2要素が揃うことになるため、共有端末では登録しないでください
 
 ## プロジェクト
 

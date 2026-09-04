@@ -38,3 +38,33 @@ def test_sso_login_uses_ipv4_transport():
         transport = call_kwargs["transport"]
         assert isinstance(transport, httpx.HTTPTransport)
         assert transport._pool._local_address == "0.0.0.0"
+
+
+def test_sso_login_calls_otp_provider_when_totp_form_is_submitted(mocker):
+    """TOTPはSSO開始前ではなく、TOTPフォームへの送信直前に生成する。"""
+    totp_form = httpx.Response(
+        200,
+        request=httpx.Request("GET", "https://idp.example.test/totp"),
+        text='''<form action="/verify"><input name="j_tokenNumber" value=""></form>''',
+    )
+    token_page = httpx.Response(
+        200,
+        request=httpx.Request("POST", "https://idp.example.test/verify"),
+        text="<script>localStorage.setItem('token', 'x'); token = 'aaa.bbb.ccc';</script>",
+    )
+    session = mocker.MagicMock()
+    session.__enter__.return_value = session
+    session.get.return_value = totp_form
+    provider = mocker.Mock(return_value="654321")
+
+    def post(_url, *, data=None):
+        provider.assert_called_once_with()
+        assert data["j_tokenNumber"] == "654321"
+        return token_page
+
+    session.post.side_effect = post
+    mocker.patch("mdx_cli.api.endpoints.auth.httpx.Client", return_value=session)
+
+    token = sso_login("https://oprpl.mdx.jp", "user", "pass", provider)
+
+    assert token == "aaa.bbb.ccc"

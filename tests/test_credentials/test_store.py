@@ -77,3 +77,58 @@ def test_get_store_returns_same_instance(monkeypatch, tmp_path):
     get_store.cache_clear()
     assert get_store() is get_store()
     assert get_store()._config_dir == tmp_path
+
+
+def test_save_and_load_totp_secret(tmp_path, mocker):
+    """TOTPシークレットは所有ユーザーとセットで保存・読込される"""
+    mocker.patch("mdx_cli.credentials.store.keyring_available", return_value=False)
+    store = CredentialStore(config_dir=tmp_path)
+    store.save_totp_secret("testuser", "GEZDGNBVGY3TQOJQ")
+    assert store.load_totp_secret() == ("testuser", "GEZDGNBVGY3TQOJQ")
+
+
+def test_load_totp_secret_when_none_saved(tmp_path, mocker):
+    mocker.patch("mdx_cli.credentials.store.keyring_available", return_value=False)
+    store = CredentialStore(config_dir=tmp_path)
+    assert store.load_totp_secret() is None
+
+
+def test_load_totp_secret_returns_none_for_corrupt_encrypted_file(tmp_path, mocker):
+    """保存ファイルが途中書き込み等で壊れても、ログインは手入力へ戻れる。"""
+    mocker.patch("mdx_cli.credentials.store.keyring_available", return_value=False)
+    store = CredentialStore(config_dir=tmp_path)
+    (tmp_path / "totp.enc").write_bytes(b"not-a-fernet-token")
+
+    assert store.load_totp_secret() is None
+
+
+def test_load_totp_secret_returns_none_for_missing_fields(tmp_path, mocker):
+    mocker.patch("mdx_cli.credentials.store.keyring_available", return_value=False)
+    store = CredentialStore(config_dir=tmp_path)
+    store._write_fernet("totp.enc", {"username": "alice"})
+
+    assert store.load_totp_secret() is None
+
+
+def test_delete_credentials_also_deletes_totp_secret(tmp_path, mocker):
+    """logout（delete_credentials）でTOTPシークレットも消える。
+
+    ID/PWだけ消えてシークレットが残ると、別ユーザーのOTPを生成し続けてしまう。
+    """
+    mocker.patch("mdx_cli.credentials.store.keyring_available", return_value=False)
+    store = CredentialStore(config_dir=tmp_path)
+    store.save_credentials("testuser", "testpass")
+    store.save_totp_secret("testuser", "GEZDGNBVGY3TQOJQ")
+    store.delete_credentials()
+    assert store.load_totp_secret() is None
+
+
+def test_delete_totp_secret(tmp_path, mocker):
+    """ID/PWは残したままTOTPシークレットだけ解除できる。"""
+    mocker.patch("mdx_cli.credentials.store.keyring_available", return_value=False)
+    store = CredentialStore(config_dir=tmp_path)
+    store.save_credentials("testuser", "testpass")
+    store.save_totp_secret("testuser", "GEZDGNBVGY3TQOJQ")
+    store.delete_totp_secret()
+    assert store.load_totp_secret() is None
+    assert store.load_credentials() == ("testuser", "testpass")
