@@ -3,6 +3,7 @@ import logging
 import httpx
 import typer
 
+from mdx_cli import __version__
 from mdx_cli.api.spinner import stop_active_spinner
 from mdx_cli.commands.auth import app as auth_app
 from mdx_cli.commands.network import app as network_app
@@ -21,9 +22,20 @@ app.add_typer(template_app, name="template")
 app.add_typer(task_app, name="task")
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        from mdx_cli.console import console
+
+        console.print(__version__)
+        raise typer.Exit()
+
+
 @app.callback()
 def main(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="詳細ログ出力"),
+    version: bool = typer.Option(
+        False, "--version", callback=_version_callback, is_eager=True, help="バージョンを表示"
+    ),
 ) -> None:
     if verbose:
         logging.basicConfig(

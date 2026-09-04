@@ -33,3 +33,32 @@ def test_create_client_returns_mdx_client_with_spinner():
     client = create_client()
     assert isinstance(client, MDXClient)
     assert isinstance(client.spinner, RequestSpinner)
+
+
+def test_relogin_uses_saved_totp_secret(mocker):
+    """再ログインでもTOTPをSSOフォーム送信時まで生成しない。"""
+    from mdx_cli.api.client import _make_relogin_fn
+    from mdx_cli.credentials.totp import generate_totp
+    from mdx_cli.settings import Settings
+
+    secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    store = mocker.MagicMock()
+    store.load_credentials.return_value = ("saved_user", "saved_pass")
+    store.load_totp_secret.return_value = ("saved_user", secret)
+    mocker.patch("mdx_cli.credentials.store.get_store", return_value=store)
+    generated_otp = None
+
+    def fake_sso_login(**kwargs):
+        nonlocal generated_otp
+        assert callable(kwargs["otp"])
+        generated_otp = kwargs["otp"]()
+        return "new-token"
+
+    mock_sso = mocker.patch("mdx_cli.api.endpoints.auth.sso_login", side_effect=fake_sso_login)
+
+    token = _make_relogin_fn(Settings())()
+
+    assert token == "new-token"
+    assert generated_otp == generate_totp(secret)
+    mock_sso.assert_called_once()
+    store.save_token.assert_called_once_with("new-token")

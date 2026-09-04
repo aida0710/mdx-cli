@@ -19,7 +19,8 @@ class MDXClient(httpx.Client):
 
 
 def _make_relogin_fn(settings: Settings):
-    """保存済みID/PWを使い、OTPだけプロンプトして再ログインする関数を返す。"""
+    """保存済みID/PWと、登録済みならTOTPを使って再ログインする関数を返す。"""
+
     def relogin() -> str | None:
         from mdx_cli.api.endpoints.auth import sso_login
         from mdx_cli.credentials.store import get_store
@@ -32,15 +33,19 @@ def _make_relogin_fn(settings: Settings):
         username, password = creds
         import questionary
         from mdx_cli.api.spinner import stop_active_spinner
+        from mdx_cli.credentials.totp import otp_from_store
+
         stop_active_spinner()
         err_console.print(f"[yellow]セッション期限切れ。再ログインします（ユーザー: {username}）[/yellow]")
-        otp = questionary.text("OTP（ワンタイムパスワード）:").unsafe_ask()
+
+        def provide_otp() -> str:
+            return otp_from_store(store, username) or questionary.text("OTP（ワンタイムパスワード）:").unsafe_ask()
 
         token = sso_login(
             base_url=settings.base_url,
             username=username,
             password=password,
-            otp=otp,
+            otp=provide_otp,
             timeout=settings.request_timeout,
         )
         if token:

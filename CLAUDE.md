@@ -163,3 +163,10 @@ render(data, VM_COLUMNS, json_mode=json)  # --json ならJSON、なければRich
 - questionary の入力はモックする（パイプ入力非対応）
 - API呼び出しは respx でモック
 - `extra="allow"` のため、テストのAPIレスポンスは実際の形式に合わせる
+
+## リリース
+
+`pyproject.toml` の `version` と `src/mdx_cli/__init__.py` の `__version__` を同じ値に上げ、
+`uv lock` で `uv.lock` を同期してから、
+`v<version>` タグを push すると Release ワークフローがバイナリと `checksums.txt` を公開する。
+バージョンがタグとズレているとワークフローの verify ジョブで落ちる（tests/test_docs.py でも検証）。

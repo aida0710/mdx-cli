@@ -1,5 +1,6 @@
 from typer.testing import CliRunner
 
+from mdx_cli import __version__
 from mdx_cli.main import app
 
 runner = CliRunner()
@@ -106,3 +107,11 @@ def test_cli_passes_through_normal_exit():
 
     with patch("mdx_cli.main.app", return_value=None):
         cli()  # 例外なく戻る
+
+
+def test_version_option():
+    """--version でバージョンを表示して終了する（リリース後の確認に使う）"""
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert __version__ in result.output
+    assert result.output.strip() == "2.0.0"
