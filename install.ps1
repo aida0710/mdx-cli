@@ -49,6 +49,11 @@ try {
     } catch {
         throw "mdx: checksums.txt を取得できないため中止しました: $base/checksums.txt`n$($_.Exception.Message)"
     }
+    $bundle = $false
+    if (Get-Content "$tmp\checksums.txt" | Where-Object { $_ -match '\s\*?mdx-windows-x86_64\.zip$' }) {
+        $asset = 'mdx-windows-x86_64.zip'
+        $bundle = $true
+    }
     $pattern = "\s\*?" + [regex]::Escape($asset) + "$"
     $lines = @(Get-Content "$tmp\checksums.txt" | Where-Object { $_ -match $pattern })
     if ($lines.Count -ne 1) {
@@ -66,24 +71,80 @@ try {
     }
     Note "SHA-256 一致: $actual"
 
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
-    # 置き換えに失敗した場合は、退避した既存バイナリを必ず元へ戻す。
-    $backup = "$target.old"
-    $hasBackup = $false
-    if (Test-Path $target) {
-        Move-Item -Force $target $backup
-        $hasBackup = $true
-    }
-    try {
-        Move-Item -Force "$tmp\mdx.exe" $target
-    } catch {
-        if ($hasBackup -and (Test-Path $backup)) {
-            Move-Item -Force $backup $target
+    $source = "$tmp\mdx.exe"
+    if ($bundle) {
+        # 展開前に、全エントリが mdx/ 配下に収まることを確認する。
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [IO.Compression.ZipFile]::OpenRead((Get-Item -LiteralPath $source).FullName)
+        try {
+            foreach ($entry in $zip.Entries) {
+                $name = $entry.FullName.Replace('\', '/')
+                if ($name -notmatch '^mdx/' -or $name -match '(^|/)\.\.(/|$)' -or $name.Contains(':')) {
+                    throw 'mdx: アーカイブ内のパスが不正です'
+                }
+            }
+        } finally { $zip.Dispose() }
+        [IO.Compression.ZipFile]::ExtractToDirectory((Get-Item -LiteralPath $source).FullName, (Join-Path $tmp 'unpacked'))
+        $source = "$tmp\unpacked\mdx\mdx.exe"
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf) -or
+            -not (Test-Path -LiteralPath "$tmp\unpacked\mdx\_internal" -PathType Container)) {
+            throw 'mdx: 実行ファイルまたは _internal がありません'
         }
-        throw
     }
-    if ($hasBackup) {
-        Remove-Item -Force $backup
+
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $lockPath = Join-Path $dir '.mdx-install.lock'
+    $lock = [IO.File]::Open($lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $backup = Join-Path $dir ('.mdx-backup-' + [guid]::NewGuid())
+    $internal = Join-Path $dir '_internal'
+    $stage = Join-Path $dir ('.mdx-stage-' + [guid]::NewGuid())
+    $hasBinary = $false
+    $hasInternal = $false
+    $newBinary = $false
+    $newInternal = $false
+    $keepBackup = $false
+    try {
+        New-Item -ItemType Directory -Path $stage | Out-Null
+        Copy-Item -LiteralPath $source -Destination (Join-Path $stage 'mdx.exe')
+        if ($bundle) {
+            Copy-Item -LiteralPath "$tmp\unpacked\mdx\_internal" -Destination (Join-Path $stage '_internal') -Recurse
+        }
+        $source = Join-Path $stage 'mdx.exe'
+        New-Item -ItemType Directory -Path $backup | Out-Null
+        # 実行中ファイルがロックされていれば、runtimeを触る前に失敗する。
+        if (Test-Path -LiteralPath $target) {
+            Move-Item -Force $target (Join-Path $backup 'mdx.exe')
+            $hasBinary = $true
+        }
+        if ($bundle) {
+            if (Test-Path -LiteralPath $internal) {
+                Move-Item -Force $internal (Join-Path $backup '_internal')
+                $hasInternal = $true
+            }
+            Move-Item -Force (Join-Path $stage '_internal') $internal
+            $newInternal = $true
+        }
+        Move-Item -Force $source $target
+        $newBinary = $true
+        $installedVersion = & $target --version
+        if ($LASTEXITCODE -ne 0) { throw 'mdx: 新版を起動できません' }
+    } catch {
+        $installError = $_
+        try {
+            if ($newBinary) { Remove-Item -LiteralPath $target -Force }
+            if ($newInternal) { Remove-Item -LiteralPath $internal -Recurse -Force }
+            if ($hasInternal) { Move-Item -Force (Join-Path $backup '_internal') $internal }
+            if ($hasBinary) { Move-Item -Force (Join-Path $backup 'mdx.exe') $target }
+        } catch {
+            $keepBackup = $true
+            throw "mdx: 復元に失敗しました。旧版は $backup に保存しています。$($_.Exception.Message)"
+        }
+        throw $installError
+    } finally {
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+        $lock.Dispose()
+        Remove-Item -LiteralPath $lockPath -Force
+        if (-not $keepBackup) { Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue }
     }
     Write-Host "mdx: $target を更新しました"
 } finally {
@@ -103,8 +164,4 @@ if ($existing -and $existing -ne $target) {
     Note "PATH 上では $existing が先に解決されます"
 }
 
-try {
-    Write-Host ("mdx: バージョン " + (& $target --version))
-} catch {
-    Note "$target --version を実行できませんでした"
-}
+Write-Host ("mdx: バージョン " + $installedVersion)

@@ -23,6 +23,10 @@ irm https://github.com/aida0710/mdx-cli/releases/latest/download/install.ps1 | i
 - リリースの `checksums.txt` で SHA-256 を照合し、取得不能・不一致ならインストールしません
 - アップデートは同じコマンドの再実行
 - 配布しているのは macOS(arm64) / Linux(x86_64, arm64) / Windows(x86_64) です
+- Python実行環境を同梱したアーカイブをインストール時に展開します。毎回の起動時には展開しません
+- macOS / Linuxでは実体をインストール先の `.mdx-runtime/` に配置し、`mdx` からリンクします。Windowsでは `mdx.exe` と `_internal/` を一緒に配置します
+- `mdx` のリンクや実行ファイルだけを別端末へコピーせず、その端末でもインストーラを実行してください
+- macOS / Linuxでは実行中プロセスのため旧runtimeを残します
 
 ### uv版からバイナリ版へ切り替える場合
 

@@ -76,39 +76,40 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev
 
-      - name: Build binary
-        run: uv run pyinstaller --onefile --name mdx src/mdx_cli/main.py
+      - name: Build application bundle
+        run: uv run pyinstaller --onedir --name mdx src/mdx_cli/main.py
 
-      - name: Rename binary (Unix)
+      - name: Package application bundle
+        run: python scripts/package_release.py ${{ matrix.artifact }}
+
+      - name: Smoke test installer (Unix)
         if: runner.os != 'Windows'
-        run: mv dist/mdx dist/${{ matrix.artifact }}
+        env:
+          MDX_TEST_BUNDLE_ARCHIVE: ${{ github.workspace }}/dist/${{ matrix.artifact }}.tar.gz
+        run: uv run --no-sync pytest tests/test_installers.py -k real_release_bundle -q
 
-      - name: Rename binary (Windows)
+      - name: Smoke test installer (Windows)
         if: runner.os == 'Windows'
-        run: mv dist/mdx.exe dist/${{ matrix.artifact }}.exe
+        shell: pwsh
+        run: |
+          $env:MDX_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'mdx-smoke'
+          function Invoke-WebRequest {
+            param($Uri, $OutFile, [switch]$UseBasicParsing)
+            Copy-Item (Join-Path 'dist' ($Uri.Split('/')[-1])) $OutFile
+          }
+          & ./install.ps1
+          & ./install.ps1
+          & "$env:MDX_INSTALL_DIR/mdx.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'Installed bundle failed to start' }
 
-      # 壊れたバイナリをそのまま公開しないよう、起動できることだけ確かめる
-      - name: Smoke test (Unix)
-        if: runner.os != 'Windows'
-        run: ./dist/${{ matrix.artifact }} --version
-
-      - name: Smoke test (Windows)
-        if: runner.os == 'Windows'
-        run: ./dist/${{ matrix.artifact }}.exe --version
-
-      - name: Upload artifact (Unix)
-        if: runner.os != 'Windows'
+      - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
-
-      - name: Upload artifact (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}.exe
+          path: |
+            dist/${{ matrix.artifact }}.tar.gz
+            dist/${{ matrix.artifact }}.zip
+          if-no-files-found: error
 
   release:
     needs: build
