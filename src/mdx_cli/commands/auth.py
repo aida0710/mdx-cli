@@ -8,7 +8,11 @@ from questionary import Choice
 from mdx_cli.api.endpoints.auth import sso_login
 from mdx_cli.commands._common import fail
 from mdx_cli.console import console
-from mdx_cli.credentials.store import get_store
+from mdx_cli.credentials.store import (
+    CREDENTIAL_BACKEND_FILE,
+    CREDENTIAL_BACKEND_KEYRING,
+    get_store,
+)
 from mdx_cli.credentials.totp import generate_totp, otp_from_store, verify_totp
 from mdx_cli.settings import get_settings
 
@@ -23,13 +27,28 @@ def _read_non_interactive_secret(stream: TextIO) -> str:
 
 
 @app.command()
-def login() -> None:
+def login(
+    keychain: bool = typer.Option(
+        False,
+        "--keychain",
+        "--keyring",
+        help="ID/PWをOSの資格情報ストア（macOS Keychain等）に保存",
+    ),
+) -> None:
     """MDX にログインする（Shibboleth SSO経由）"""
     store = get_store()
     settings = get_settings()
 
+    # Keychainへの接続は遅い環境があるためopt-inとし、デフォルトでは一切触らない。
+    store.select_credential_backend(
+        CREDENTIAL_BACKEND_KEYRING if keychain else CREDENTIAL_BACKEND_FILE
+    )
+
     # 保存済みID/PWがあればそのまま使う（別ユーザーに変えるときは logout してから）
-    creds = store.load_credentials()
+    try:
+        creds = store.load_credentials()
+    except RuntimeError as exc:
+        fail(str(exc))
     if creds:
         username, password = creds
         console.print(f"ユーザー: [bold]{username}[/bold]")
@@ -54,7 +73,10 @@ def login() -> None:
     if token is None:
         fail("ログインに失敗しました。認証情報を確認してください。")
 
-    store.save_credentials(username, password)
+    try:
+        store.save_credentials(username, password)
+    except RuntimeError as exc:
+        fail(str(exc))
     store.save_token(token)
     console.print(f"ログインしました（ユーザー: {username}）")
 
@@ -133,11 +155,23 @@ def otp(
 
 
 @app.command()
-def logout() -> None:
+def logout(
+    keychain: bool = typer.Option(
+        False,
+        "--keychain",
+        "--keyring",
+        help="旧バージョン等がOSの資格情報ストアへ保存した情報を削除",
+    ),
+) -> None:
     """ログアウトしてクレデンシャルを削除する"""
     store = get_store()
+    if keychain:
+        store.select_credential_backend(CREDENTIAL_BACKEND_KEYRING)
     store.delete_token()
-    store.delete_credentials()
+    try:
+        store.delete_credentials()
+    except RuntimeError as exc:
+        fail(str(exc))
     console.print("ログアウトしました")
 
 

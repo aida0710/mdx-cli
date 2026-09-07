@@ -41,8 +41,8 @@ irm https://github.com/aida0710/mdx-cli/releases/latest/download/install.ps1 | i
 
 - 置き先は root なら `/usr/local/bin`、それ以外は `~/.local/bin`（Windows は `%LOCALAPPDATA%\Programs\mdx`）。`MDX_INSTALL_DIR` で変更できます
 - 版を固定する場合は、macOS / Linux では
-  `curl -fsSL https://github.com/aida0710/mdx-cli/releases/latest/download/install.sh | MDX_VERSION=v2.0.0 sh`、
-  Windows では実行前に `$env:MDX_VERSION = 'v2.0.0'` を設定します
+  `curl -fsSL https://github.com/aida0710/mdx-cli/releases/latest/download/install.sh | MDX_VERSION=v2.1.0 sh`、
+  Windows では実行前に `$env:MDX_VERSION = 'v2.1.0'` を設定します
 - リリースの `checksums.txt` で SHA-256 を照合し、取得不能・不一致ならインストールしません
 - アップデートは同じコマンドの再実行
 - 配布しているのは macOS(arm64) / Linux(x86_64, arm64) / Windows(x86_64) です
@@ -122,13 +122,18 @@ mdx task          タスク・操作履歴管理
 Shibboleth SSO 経由でログインします。ユーザー名・パスワード・TOTP の入力が必要です。
 
 ```bash
-mdx auth login     # ログイン
+mdx auth login     # ログイン（暗号化ファイルへ保存）
+mdx auth login --keychain  # OSの資格情報ストアを使う場合だけ明示
 mdx auth otp       # TOTPシークレットを登録（OTP自動入力）
 mdx auth status    # 認証状態を確認
 mdx auth logout    # ログアウト（全クレデンシャル削除）
 ```
 
-- ユーザー名とパスワードは keyring（macOS Keychain 等）に保存
+- ユーザー名とパスワードはデフォルトで `~/.config/mdx-cli/credentials.enc` に暗号化して保存
+- OSの資格情報ストア（macOS Keychain 等）を使う場合は `mdx auth login --keychain` を指定
+  （`--keyring` も同じ意味です）。デフォルト経路ではKeychainへ接続しません
+- 旧バージョンがKeychainへ保存した情報を明示的に削除してログアウトする場合は
+  `mdx auth logout --keychain` を使います
 - 2回目以降のログインは保存済みユーザーをそのまま使い、OTP の入力のみ
   （別ユーザーに切り替える場合は `mdx auth logout` してから `mdx auth login`）
 - トークン期限切れ時は自動で再ログイン（TOTP登録済みなら入力不要、未登録ならOTPだけプロンプト）
@@ -159,7 +164,7 @@ mdx auth otp --non-interactive < /path/to/totp-secret
 
 - シークレットは登録時のユーザー名とセットで保存され、そのアカウントのログイン時だけ使われます
   （別ユーザーでログインする場合は自動入力されず、OTP の手入力に戻ります）
-- 保存先は ID/PW と同じ keyring（不可の場合は暗号化ファイル）で、`mdx auth logout` でまとめて削除されます
+- 保存先は ID/PW と同じ場所で、`mdx auth logout` でまとめて削除されます
 - 同じ端末にパスワードと第2要素が揃うことになるため、共有端末では登録しないでください
 
 ## プロジェクト
