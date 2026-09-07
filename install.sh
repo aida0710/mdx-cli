@@ -130,7 +130,7 @@ if [ "$bundle" = 1 ]; then
   awk '$0 !~ /^mdx(\/|$)/ || $0 ~ /(^|\/)\.\.(\/|$)/ {exit 1}' "$tmp/members" \
     || die "アーカイブ内のパスが不正です"
   mkdir "$tmp/unpacked"
-  tar -xzf "$tmp/mdx" -C "$tmp/unpacked" || die "アーカイブを展開できません"
+  tar -xzf "$tmp/mdx" --no-same-owner -C "$tmp/unpacked" || die "アーカイブを展開できません"
   [ -f "$tmp/unpacked/mdx/mdx" ] && [ -d "$tmp/unpacked/mdx/_internal" ] \
     || die "実行ファイルまたは _internal がありません"
   mkdir -p "$dir/.mdx-runtime"
