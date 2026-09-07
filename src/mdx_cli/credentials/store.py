@@ -8,6 +8,10 @@ from cryptography.fernet import Fernet, InvalidToken
 
 
 SERVICE_NAME = "mdx-cli"
+CREDENTIAL_BACKEND_FILE = "file"
+CREDENTIAL_BACKEND_KEYRING = "keyring"
+_CREDENTIAL_BACKENDS = {CREDENTIAL_BACKEND_FILE, CREDENTIAL_BACKEND_KEYRING}
+_BACKEND_CONFIG_FILE = "credential-store.json"
 
 
 @lru_cache
@@ -45,23 +49,59 @@ def _derive_key(config_dir: Path) -> bytes:
 
 
 class CredentialStore:
-    def __init__(self, config_dir: Path | None = None):
+    def __init__(self, config_dir: Path | None = None, credential_backend: str | None = None):
         if config_dir is None:
             config_dir = Path.home() / ".config" / "mdx-cli"
         self._config_dir = config_dir
         self._config_dir.mkdir(parents=True, exist_ok=True)
+        self._credential_backend = credential_backend or self._load_credential_backend()
+        if self._credential_backend not in _CREDENTIAL_BACKENDS:
+            raise ValueError(f"不明なクレデンシャル保存先です: {self._credential_backend}")
+
+    @property
+    def credential_backend(self) -> str:
+        return self._credential_backend
+
+    def select_credential_backend(self, backend: str) -> None:
+        """このプロセスで使う保存先を選ぶ。
+
+        選択は資格情報の保存成功後に永続化する。これにより、ログイン失敗で
+        既存の保存先設定だけが切り替わることを防ぐ。
+        """
+        if backend not in _CREDENTIAL_BACKENDS:
+            raise ValueError(f"不明なクレデンシャル保存先です: {backend}")
+        self._credential_backend = backend
+
+    def _load_credential_backend(self) -> str:
+        """保存済みの選択を返す。未設定・破損時は暗号化ファイルを使う。"""
+        backend = self._read_json_field(self._config_dir / _BACKEND_CONFIG_FILE, "backend")
+        return backend if backend in _CREDENTIAL_BACKENDS else CREDENTIAL_BACKEND_FILE
+
+    def _persist_credential_backend(self) -> None:
+        path = self._config_dir / _BACKEND_CONFIG_FILE
+        path.write_text(json.dumps({"backend": self._credential_backend}))
+        os.chmod(path, 0o600)
+
+    def _require_keyring(self):
+        """明示的に選択された場合だけ keyring に接続する。"""
+        if not keyring_available():
+            raise RuntimeError("OSの資格情報ストアを利用できません")
+        import keyring
+
+        return keyring
 
     def save_credentials(self, username: str, password: str) -> None:
-        if keyring_available():
-            import keyring
+        if self._credential_backend == CREDENTIAL_BACKEND_KEYRING:
+            keyring = self._require_keyring()
             keyring.set_password(SERVICE_NAME, "username", username)
             keyring.set_password(SERVICE_NAME, "password", password)
         else:
             self._save_credentials_fernet(username, password)
+        self._persist_credential_backend()
 
     def load_credentials(self) -> tuple[str, str] | None:
-        if keyring_available():
-            import keyring
+        if self._credential_backend == CREDENTIAL_BACKEND_KEYRING:
+            keyring = self._require_keyring()
             username = keyring.get_password(SERVICE_NAME, "username")
             password = keyring.get_password(SERVICE_NAME, "password")
             if username and password:
@@ -76,8 +116,8 @@ class CredentialStore:
         シークレットだけ残ると、別ユーザーでログインした際に他人のOTPを
         生成し続けてしまうため、logout では必ず両方消す。
         """
-        if keyring_available():
-            import keyring
+        if self._credential_backend == CREDENTIAL_BACKEND_KEYRING:
+            keyring = self._require_keyring()
             for key in ("username", "password", "totp_user", "totp_secret"):
                 try:
                     keyring.delete_password(SERVICE_NAME, key)
@@ -88,6 +128,9 @@ class CredentialStore:
                 path = self._config_dir / name
                 if path.exists():
                     path.unlink()
+        backend_file = self._config_dir / _BACKEND_CONFIG_FILE
+        if backend_file.exists():
+            backend_file.unlink()
 
     def save_totp_secret(self, username: str, secret: str) -> None:
         """TOTPシークレットを所有ユーザーとセットで保存する。
@@ -95,16 +138,16 @@ class CredentialStore:
         別アカウントに切り替えたときに他人のOTPを生成しないよう、
         読み出し側でユーザー名を照合できるようにする。
         """
-        if keyring_available():
-            import keyring
+        if self._credential_backend == CREDENTIAL_BACKEND_KEYRING:
+            keyring = self._require_keyring()
             keyring.set_password(SERVICE_NAME, "totp_user", username)
             keyring.set_password(SERVICE_NAME, "totp_secret", secret)
         else:
             self._write_fernet("totp.enc", {"username": username, "secret": secret})
 
     def delete_totp_secret(self) -> None:
-        if keyring_available():
-            import keyring
+        if self._credential_backend == CREDENTIAL_BACKEND_KEYRING:
+            keyring = self._require_keyring()
             for key in ("totp_user", "totp_secret"):
                 try:
                     keyring.delete_password(SERVICE_NAME, key)
@@ -117,8 +160,8 @@ class CredentialStore:
 
     def load_totp_secret(self) -> tuple[str, str] | None:
         """(ユーザー名, シークレット) を返す。未登録なら None。"""
-        if keyring_available():
-            import keyring
+        if self._credential_backend == CREDENTIAL_BACKEND_KEYRING:
+            keyring = self._require_keyring()
             username = keyring.get_password(SERVICE_NAME, "totp_user")
             secret = keyring.get_password(SERVICE_NAME, "totp_secret")
             return (username, secret) if username and secret else None

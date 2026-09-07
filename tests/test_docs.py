@@ -54,19 +54,19 @@ def test_version_matches_pyproject():
     assert __version__ == pyproject["project"]["version"]
 
 
-def test_release_version_is_2_0_0():
+def test_release_version_is_2_1_0():
     import tomllib
 
     from mdx_cli import __version__
 
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
-    assert __version__ == "2.0.0"
-    assert pyproject["project"]["version"] == "2.0.0"
+    assert __version__ == "2.1.0"
+    assert pyproject["project"]["version"] == "2.1.0"
     assert not any(dependency.startswith("typer[all]") for dependency in pyproject["project"]["dependencies"])
 
     lock = tomllib.loads((ROOT / "uv.lock").read_text())
     root_package = next(package for package in lock["package"] if package["name"] == "mdx-cli")
-    assert root_package["version"] == "2.0.0"
+    assert root_package["version"] == "2.1.0"
 
 
 def test_install_script_assets_match_release_workflow():

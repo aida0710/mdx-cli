@@ -1,15 +1,47 @@
 
-from mdx_cli.credentials.store import CredentialStore
+from mdx_cli.credentials.store import (
+    CREDENTIAL_BACKEND_KEYRING,
+    CredentialStore,
+)
 
 
 def test_save_and_load_credentials(tmp_path, mocker):
-    """keyringが使えない場合、Fernetフォールバックで保存・読込できる"""
-    mocker.patch("mdx_cli.credentials.store.keyring_available", return_value=False)
+    """デフォルトではFernet暗号化ファイルへ保存・読込できる"""
+    available = mocker.patch("mdx_cli.credentials.store.keyring_available")
     store = CredentialStore(config_dir=tmp_path)
     store.save_credentials("testuser", "testpass")
     username, password = store.load_credentials()
     assert username == "testuser"
     assert password == "testpass"
+    available.assert_not_called()
+
+
+def test_keyring_is_used_only_when_explicitly_selected(tmp_path, mocker):
+    """keyringは明示選択された場合だけ接続し、その選択を次回へ引き継ぐ。"""
+    mock_keyring = mocker.MagicMock()
+    values = {}
+    mock_keyring.set_password.side_effect = lambda service, key, value: values.__setitem__((service, key), value)
+    mock_keyring.get_password.side_effect = lambda service, key: values.get((service, key))
+    mocker.patch.dict("sys.modules", {"keyring": mock_keyring})
+    mocker.patch("mdx_cli.credentials.store.keyring_available", return_value=True)
+
+    store = CredentialStore(config_dir=tmp_path, credential_backend=CREDENTIAL_BACKEND_KEYRING)
+    store.save_credentials("testuser", "testpass")
+
+    reloaded = CredentialStore(config_dir=tmp_path)
+    assert reloaded.credential_backend == CREDENTIAL_BACKEND_KEYRING
+    assert reloaded.load_credentials() == ("testuser", "testpass")
+
+
+def test_invalid_or_missing_backend_config_defaults_to_file(tmp_path, mocker):
+    """設定がない、または壊れていてもKeychainへ接続しない。"""
+    (tmp_path / "credential-store.json").write_text('{"backend": "unknown"}')
+    available = mocker.patch("mdx_cli.credentials.store.keyring_available")
+
+    store = CredentialStore(config_dir=tmp_path)
+    assert store.credential_backend == "file"
+    assert store.load_credentials() is None
+    available.assert_not_called()
 
 
 def test_delete_credentials(tmp_path, mocker):

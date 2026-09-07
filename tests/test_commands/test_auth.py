@@ -36,6 +36,43 @@ def test_auth_login_success_new_user():
                 store.save_token.assert_called_once_with("jwt-token-123")
 
 
+def test_auth_login_defaults_to_encrypted_file():
+    """オプションなしのloginはKeychainを選ばない。"""
+    with patch(
+        "mdx_cli.commands.auth.sso_login",
+        side_effect=_sso_result_after_requesting_otp("jwt-token-123"),
+    ):
+        with patch("mdx_cli.commands.auth.get_store") as MockStore:
+            store = MockStore.return_value
+            store.load_credentials.return_value = None
+            store.load_totp_secret.return_value = None
+            with patch("mdx_cli.commands.auth.questionary") as mock_q:
+                mock_q.text.return_value.unsafe_ask.side_effect = ["user", "123456"]
+                mock_q.password.return_value.unsafe_ask.return_value = "secret"
+                result = runner.invoke(app, ["login"])
+
+    assert result.exit_code == 0
+    store.select_credential_backend.assert_called_once_with("file")
+
+
+def test_auth_login_keychain_is_opt_in():
+    with patch(
+        "mdx_cli.commands.auth.sso_login",
+        side_effect=_sso_result_after_requesting_otp("jwt-token-123"),
+    ):
+        with patch("mdx_cli.commands.auth.get_store") as MockStore:
+            store = MockStore.return_value
+            store.load_credentials.return_value = None
+            store.load_totp_secret.return_value = None
+            with patch("mdx_cli.commands.auth.questionary") as mock_q:
+                mock_q.text.return_value.unsafe_ask.side_effect = ["user", "123456"]
+                mock_q.password.return_value.unsafe_ask.return_value = "secret"
+                result = runner.invoke(app, ["login", "--keychain"])
+
+    assert result.exit_code == 0
+    store.select_credential_backend.assert_called_once_with("keyring")
+
+
 def test_auth_login_success_saved_user():
     """保存済みID/PWがある場合、ユーザー名は確定表示してOTPだけ入力させる"""
     with patch(
@@ -103,6 +140,17 @@ def test_auth_logout(tmp_path, monkeypatch):
         assert result.exit_code == 0
         store.delete_token.assert_called_once()
         store.delete_credentials.assert_called_once()
+
+
+def test_auth_logout_can_explicitly_delete_keychain_credentials():
+    """旧バージョンのKeychain保存情報も明示指定で削除できる。"""
+    with patch("mdx_cli.commands.auth.get_store") as MockStore:
+        store = MockStore.return_value
+        result = runner.invoke(app, ["logout", "--keychain"])
+
+    assert result.exit_code == 0
+    store.select_credential_backend.assert_called_once_with("keyring")
+    store.delete_credentials.assert_called_once()
 
 
 def test_auth_login_uses_saved_totp_secret():
