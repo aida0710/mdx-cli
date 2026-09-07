@@ -148,12 +148,24 @@ def test_installers_never_advertise_skipping_checksum_verification():
 
 
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShellがありません")
-def test_install_ps1_restores_previous_binary_when_replacement_fails(tmp_path):
+@pytest.mark.parametrize("bundle", [False, True])
+def test_install_ps1_restores_previous_binary_when_replacement_fails(tmp_path, bundle):
     """新バイナリの配置失敗で、退避した旧版を失わない。"""
     install_dir = tmp_path / "install"
     install_dir.mkdir()
     target = install_dir / "mdx.exe"
     target.write_text("old-binary")
+    import zipfile
+
+    internal = install_dir / '_internal'
+    internal.mkdir()
+    (internal / 'marker').write_text('old-runtime')
+    archive = tmp_path / 'bundle.zip'
+    with zipfile.ZipFile(archive, 'w') as z:
+        z.writestr('mdx/mdx.exe', 'new-binary')
+        z.writestr('mdx/_internal/marker', 'new-runtime')
+    asset = 'mdx-windows-x86_64.zip' if bundle else 'mdx-windows-x86_64.exe'
+    binary_expr = f"[IO.File]::ReadAllBytes('{archive}')" if bundle else "[System.Text.Encoding]::UTF8.GetBytes('new-binary')"
     harness = tmp_path / "rollback-test.ps1"
     harness.write_text(
         fr'''
@@ -164,15 +176,15 @@ $env:MDX_INSTALL_DIR = '{install_dir}'
 $env:MDX_VERSION = 'v2.0.0'
 $global:replacementFailed = $false
 $global:target = '{target}'
-$global:newBytes = [System.Text.Encoding]::UTF8.GetBytes('new-binary')
+$global:newBytes = {binary_expr}
 $global:newHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($global:newBytes)).ToLower()
 
 function global:Invoke-WebRequest {{
     param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing)
     if ($Uri.EndsWith('/checksums.txt')) {{
-        Set-Content -NoNewline -Path $OutFile -Value "$global:newHash  mdx-windows-x86_64.exe"
+        Set-Content -NoNewline -Path $OutFile -Value "$global:newHash  {asset}"
     }} else {{
-        Set-Content -NoNewline -Path $OutFile -Value 'new-binary'
+        [IO.File]::WriteAllBytes($OutFile.Replace('\', [IO.Path]::DirectorySeparatorChar), $global:newBytes)
     }}
 }}
 
@@ -189,7 +201,7 @@ try {{
     & '{ROOT / "install.ps1"}'
 }} catch {{
     if ($global:replacementFailed -and (Test-Path $global:target) -and (Get-Content -Raw $global:target) -eq 'old-binary') {{ exit 0 }}
-    Write-Error '旧バイナリが復元されませんでした'
+    Write-Error ('旧バイナリが復元されませんでした: ' + $_)
 }}
 exit 1
 '''
@@ -203,6 +215,7 @@ exit 1
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+    assert (internal / "marker").read_text() == "old-runtime"
 
 
 def test_readme_documents_uv_migration_before_binary_install():
@@ -210,3 +223,87 @@ def test_readme_documents_uv_migration_before_binary_install():
     migration = readme.index("uv tool uninstall mdx-cli")
     binary_install = readme.index("curl -fsSL", migration)
     assert migration < binary_install
+
+
+def _archive_downloads(tmp_path, env, fake_bin, *, broken=False):
+    import tarfile
+
+    bundle = tmp_path / 'bundle' / 'mdx'
+    (bundle / '_internal').mkdir(parents=True)
+    (bundle / '_internal' / 'version').write_text('2.1.1\n')
+    _write_executable(bundle / 'mdx', 'exit 9\n' if broken else
+                      'cat "$(dirname "$(realpath "$0")")/_internal/version"\n')
+    archive = tmp_path / 'release.tar.gz'
+    with tarfile.open(archive, 'w:gz') as tar:
+        tar.add(bundle, arcname='mdx')
+    env['FAKE_ARCHIVE'] = str(archive)
+    env['FAKE_ARCHIVE_HASH'] = hashlib.sha256(archive.read_bytes()).hexdigest()
+    _write_executable(fake_bin / 'curl', '''
+url=""
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    http*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+case "$url" in
+  */checksums.txt) printf '%s  mdx-darwin-arm64.tar.gz\\n' "$FAKE_ARCHIVE_HASH" > "$out" ;;
+  */mdx-darwin-arm64.tar.gz) cp "$FAKE_ARCHIVE" "$out" ;;
+  *) exit 23 ;;
+esac
+''')
+
+
+def test_install_sh_installs_runtime_and_updates_legacy_binary(tmp_path):
+    env, fake_bin = _base_env(tmp_path)
+    _archive_downloads(tmp_path, env, fake_bin)
+    target = Path(env['MDX_INSTALL_DIR']) / 'mdx'
+    target.parent.mkdir()
+    _write_executable(target, 'echo old-version\n')
+    result = _run_install_sh(env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert target.is_symlink()
+    assert (target.resolve().parent / '_internal' / 'version').is_file()
+    assert subprocess.check_output([str(target)], text=True).strip() == '2.1.1'
+    previous = target.resolve()
+    result = _run_install_sh(env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert previous.is_file(), 'Keep old runtime available for running processes'
+    assert subprocess.check_output([str(target)], text=True).strip() == '2.1.1'
+
+
+@pytest.mark.parametrize('failure', ['checksum', 'executable', 'archive'])
+def test_install_sh_preserves_existing_install_on_bad_bundle(tmp_path, failure):
+    env, fake_bin = _base_env(tmp_path)
+    _archive_downloads(tmp_path, env, fake_bin, broken=failure == 'executable')
+    if failure == 'checksum':
+        env['FAKE_ARCHIVE_HASH'] = '0' * 64
+    elif failure == 'archive':
+        archive = Path(env['FAKE_ARCHIVE'])
+        archive.write_bytes(b'not a tar file')
+        env['FAKE_ARCHIVE_HASH'] = hashlib.sha256(archive.read_bytes()).hexdigest()
+    target = Path(env['MDX_INSTALL_DIR']) / 'mdx'
+    target.parent.mkdir()
+    _write_executable(target, 'echo old-version\n')
+    result = _run_install_sh(env)
+    assert result.returncode != 0
+    assert subprocess.check_output([str(target)], text=True).strip() == 'old-version'
+
+
+@pytest.mark.skipif(not os.environ.get('MDX_TEST_BUNDLE_ARCHIVE'), reason='Release bundle not provided')
+def test_install_sh_real_release_bundle(tmp_path):
+    """Run the real release bundle through install, replacement and relocation."""
+    env, fake_bin = _base_env(tmp_path)
+    _archive_downloads(tmp_path, env, fake_bin)
+    real_archive = Path(os.environ['MDX_TEST_BUNDLE_ARCHIVE'])
+    shutil.copyfile(real_archive, env['FAKE_ARCHIVE'])
+    env['FAKE_ARCHIVE_HASH'] = hashlib.sha256(real_archive.read_bytes()).hexdigest()
+    for _ in range(2):
+        result = _run_install_sh(env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        target = Path(env['MDX_INSTALL_DIR']) / 'mdx'
+        from mdx_cli import __version__
+        assert subprocess.check_output([str(target), '--version'], text=True).strip() == __version__
+        subprocess.run([str(target), '--help'], check=True, capture_output=True)

@@ -79,7 +79,16 @@ fi
 note "置き先: $dir/mdx（${why}）"
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT INT TERM
+runtime=""
+link_tmp=""
+cleanup() {
+  rm -rf "$tmp"
+  [ -z "$runtime" ] || rm -rf "$runtime"
+  [ -z "$link_tmp" ] || rm -f "$link_tmp"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ── SHA-256 を照合する ────────────────────────────────────────
 if command -v sha256sum >/dev/null 2>&1; then
@@ -92,6 +101,12 @@ fi
 
 fetch "$base/checksums.txt" "$tmp/checksums.txt" 2>/dev/null \
   || die "checksums.txt を取得できないため中止しました: $base/checksums.txt"
+# 新形式を優先し、旧リリースの単体バイナリもバージョン指定で導入できる。
+bundle=0
+if awk -v a="$asset.tar.gz" '$2 == a || $2 == "*"a {found=1} END {exit !found}' "$tmp/checksums.txt"; then
+  asset="$asset.tar.gz"
+  bundle=1
+fi
 expected_lines=$(awk -v a="$asset" '$2 == a || $2 == "*"a {print $1}' "$tmp/checksums.txt")
 expected_count=$(printf '%s\n' "$expected_lines" | awk 'NF {count++} END {print count + 0}')
 [ "$expected_count" = "1" ] || die "checksums.txt の $asset は1行である必要があります（実際: ${expected_count}行）"
@@ -106,10 +121,39 @@ note "SHA-256 一致: $actual"
 
 # ── 置く ──────────────────────────────────────────────────────
 mkdir -p "$dir" || die "$dir を作成できません"
-chmod 0755 "$tmp/mdx"
-# 実行中バイナリの上書きを避けるため、同ディレクトリに置いてから rename する
-mv "$tmp/mdx" "$dir/mdx.new" || die "$dir に書き込めません（MDX_INSTALL_DIR で別の場所を指定できます）"
-mv "$dir/mdx.new" "$dir/mdx"
+dir=$(cd "$dir" && pwd -P)
+[ ! -d "$dir/mdx" ] || die "$dir/mdx はディレクトリのため置換できません"
+if [ "$bundle" = 1 ]; then
+  command -v tar >/dev/null 2>&1 || die "tar が見つかりません"
+  tar -tzf "$tmp/mdx" > "$tmp/members" || die "アーカイブを読み取れません"
+  # 公式アーカイブのトップレベルは mdx/ のみ。
+  awk '$0 !~ /^mdx(\/|$)/ || $0 ~ /(^|\/)\.\.(\/|$)/ {exit 1}' "$tmp/members" \
+    || die "アーカイブ内のパスが不正です"
+  mkdir "$tmp/unpacked"
+  tar -xzf "$tmp/mdx" -C "$tmp/unpacked" || die "アーカイブを展開できません"
+  [ -f "$tmp/unpacked/mdx/mdx" ] && [ -d "$tmp/unpacked/mdx/_internal" ] \
+    || die "実行ファイルまたは _internal がありません"
+  mkdir -p "$dir/.mdx-runtime"
+  runtime=$(mktemp -d "$dir/.mdx-runtime/release.XXXXXX")
+  chmod 0755 "$dir/.mdx-runtime" "$runtime"
+  mv "$tmp/unpacked/mdx" "$runtime/bundle"
+  chmod 0755 "$runtime/bundle/mdx"
+  "$runtime/bundle/mdx" --version > /dev/null 2>&1 || die "新版を起動できないため既存版を維持します"
+  link_tmp=$(mktemp "$dir/.mdx-link.XXXXXX")
+  rm -f "$link_tmp"
+  ln -s "$runtime/bundle/mdx" "$link_tmp"
+  mv -f "$link_tmp" "$dir/mdx" || die "実行リンクを更新できません"
+  # 使用中プロセスのため旧runtimeは残す。成功した新版もcleanup対象から外す。
+  runtime=""
+  link_tmp=""
+else
+  chmod 0755 "$tmp/mdx"
+  link_tmp=$(mktemp "$dir/.mdx-bin.XXXXXX")
+  cp "$tmp/mdx" "$link_tmp"
+  chmod 0755 "$link_tmp"
+  mv -f "$link_tmp" "$dir/mdx" || die "実行ファイルを更新できません"
+  link_tmp=""
+fi
 say "mdx: $dir/mdx を更新しました"
 
 # ── 使える状態か確かめる ──────────────────────────────────────
