@@ -8,7 +8,7 @@ Web ポータル (oprpl.mdx.jp) の操作をコマンドラインから実行で
 
 ## 前提条件
 
-- **MDX内部ネットワークからの実行が必要です。** MDX VPN 接続中、または MDX VM 上から実行してください。`oprpl.mdx.jp` および `mdxidm.mdx.jp` への疎通が必要です。
+- `oprpl.mdx.jp` および `mdxidm.mdx.jp` への疎通が必要です。
 - ソースから入れる場合のみ Python 3.13+ と [uv](https://docs.astral.sh/uv/)（バイナリは単体で動きます）
 
 ## インストール
