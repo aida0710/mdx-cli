@@ -114,4 +114,4 @@ def test_version_option():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
     assert __version__ in result.output
-    assert result.output.strip() == "2.1.0"
+    assert result.output.strip() == __version__

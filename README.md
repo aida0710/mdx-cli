@@ -80,6 +80,18 @@ curl -fsSL https://raw.githubusercontent.com/aida0710/mdx-cli/main/agent-skill-i
 sh agent-skill-install.sh --source . --codex-only
 ```
 
+## リリース
+
+リリース担当者はcleanな`main`で、現在より大きい安定版SemVerを指定します。
+
+```bash
+./release.sh --dry-run 2.2.0  # 事前条件だけ確認
+./release.sh 2.2.0            # 確認後、main CI・タグ・Release CIまで実行
+```
+
+同名タグ、現在以下のversion、未commit変更、`origin/main`と同期していない状態では停止します。
+非対話実行で確認を省略する場合だけ`--yes`を追加します。
+
 ## クイックスタート
 
 ```bash
