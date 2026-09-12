@@ -14,3 +14,4 @@ build/
 *.enc
 token.json
 *.pyc
+pages/_site/
