@@ -182,13 +182,76 @@ mdx auth otp --non-interactive < /path/to/totp-secret
 ## プロジェクト
 
 ```bash
-mdx project list       # プロジェクト一覧
+mdx project list       # テナント・所属プロジェクト一覧
 mdx project summary    # VM数・リソース・ストレージ使用量
 mdx project select     # 使用するプロジェクトを選択（以降 --project-id 不要）
-mdx project show <id>  # プロジェクト詳細
+mdx project show       # ID・名称・種別・申請者・利用期間（show <id> も使用可）
+mdx project resources  # CPU/GPU要求量・使用量・割当量・翌月割当量・Rminなど
+mdx project users      # ユーザー一覧（全ページ取得）
+mdx project points     # 購入・利用・残ポイントと利用期限
+mdx project usage      # 最近7日間の資源使用量・消費ポイント
+mdx project overview   # ダッシュボードの資源概要・一覧・VM状態別件数
 mdx project storage <id>  # ストレージ情報
 mdx project keys <id>  # アクセスキー一覧
 ```
+
+`show`・`resources`・`users`・`points`・`usage`・`overview` は `--project-id <id>` / `-p <id>`、
+環境変数 `MDX_PROJECT_ID`、選択済みプロジェクトの順で対象を解決します。
+`show <id>` の明示引数も環境変数・選択済み設定より優先します。
+いずれも `--json` でJSON出力に切り替えられます。
+`list --json` はテナントの `name` と `projects[]` の階層を保持し、通常表示では所属先とプロジェクトを一覧にします。
+`show` はプロジェクト情報API、`summary` は従来どおりVM数と資源・ストレージ使用量の集約です。
+
+ユーザー一覧は既定で1リクエスト100件ずつ全ページを取得します。
+`--page` を指定すると、そのページのみを取得します。`--page-size` は1〜100です。
+JSONは `count` と `results` を含み、単一ページ取得時はAPIの総件数とページ情報も保持します。
+全ページ取得時の `count` は取得したユーザー数です。
+
+```bash
+mdx project users --page 1 --page-size 10
+mdx project users --ordering=-username --username 'alice' --email 'example.jp' --auth '0' --json
+mdx project points --json
+```
+
+フィルター値はそのままAPIへ渡します。完全一致・部分一致の扱いは未確認です。
+`points` はページ条件を付けず全件を取得し、最終消費処理日時 `lastConsumed` と各ポイントの値を保持します。
+
+資源利用レポートは閲覧用のPOSTで取得します。
+`--days` は7・30・90・365に対応し、省略時は7日です。任意期間は `--start` と `--end` の両方を指定します。
+日時は厳密な `YYYY-MM-DD HH`（00〜23時）で、終了を開始より後にしてください。`--days` との併用はできません。
+日時をタイムゾーン変換せず送信します。サーバー側のタイムゾーンと期間端点の包含関係は未確認です。
+
+```bash
+mdx project usage --days 30
+mdx project usage --start '2026-09-05 00' --end '2026-09-12 00'
+mdx project usage --days 90 --lang en --json
+mdx project usage --html > usage.html
+mdx project usage --days 365 --output usage.html
+```
+
+`--lang` は `jp`（既定）または `en`。通常出力ではレポート内の表を表示し、`--json` は元レスポンスの
+`html`・`err_msg` などに、抽出した `tables` を追加します。
+各表は `caption`・`headers`・`rows` を持ち、`rowspan` / `colspan` は値を複製して矩形の行配列に展開します。
+複数段の見出しは ` / ` で結合し、見出しのない表は `headers: []` とします。
+数値も単位・桁区切り・小数桁を保った文字列なので、機械処理時は必要な列を選んで変換してください。合計行も `rows` に含みます。
+`--html` は元HTMLを標準出力へ、`--output` / `-o` はUTF-8ファイルへ保存します。
+`--json`・`--html`・`--output` はいずれか1つのみ指定できます。
+APIの `err_msg` や空HTMLは終了コード1となります。表がない場合も通常表示はエラーですが、HTMLとJSON出力で内容を確認できます。
+
+`overview --kind` は `resource`・`resource_list`・`vm`・`spot_vm`・`guarantee_vm`・`all`（既定）に対応します。
+単一種別のJSONはそのAPIのレスポンス、`all` のJSONは各種別をキーにしたオブジェクトです。
+補足APIのスキーマは未確認なので、取得したフィールド名・値をそのまま表示します。
+
+```bash
+mdx project overview --kind resource_list --json
+mdx project overview --kind vm --json
+```
+
+これらは提示されたポータル画面実装のAPI契約に基づき、合成レスポンスでテストしています。
+実レスポンスの形状・権限差・HTMLレポートの実際の構造は未検証です。
+APIの接続先は既定で `https://oprpl.mdx.jp/api`。`MDX_BASE_URL` には既存仕様どおり
+`https://oprpl.mdx.jp`（`/api` なし）を指定します。認証は既存の `Authorization: JWT <token>` を使用し、
+通常のAPIクライアントは `Content-Type: application/json` と `Accept-Language: ja` を送信します。
 
 `project summary` の表示例:
 

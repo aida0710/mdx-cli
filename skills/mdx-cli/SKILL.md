@@ -75,7 +75,8 @@ mdx network check-acl
 ## Command Selection
 
 - Use `auth` for login/logout/status.
-- Use `project` to list, select, summarize, inspect storage, or list access keys.
+- Use `project` to list/select projects, show project information, inspect resources/users/points,
+  read usage reports or dashboard overviews, inspect storage, or list access keys.
 - Use `vm` for VM inventory, deploy, lifecycle operations, reconfiguration, SSH, sync, and CSV export.
 - Use `network segment` for segment list/show.
 - Use `network acl` for interactive ACL list/add/edit/delete.

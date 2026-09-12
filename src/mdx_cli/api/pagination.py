@@ -17,15 +17,17 @@ def fetch_all(
     client: httpx.Client,
     path: str,
     params: dict | None = None,
+    *,
+    page_size: int | None = PAGE_SIZE,
 ) -> list[dict]:
     """ページネーションを自動で辿って全結果を取得する。
 
     スピナーはクライアントの event_hooks で自動制御される。
     ページネーション進捗はクライアントのスピナーメッセージを更新して表示。
     """
-    if params is None:
-        params = {}
-    params.setdefault("page_size", PAGE_SIZE)
+    params = dict(params or {})
+    if page_size is not None:
+        params.setdefault("page_size", page_size)
 
     resp = client.get(path, params=params)
     resp.raise_for_status()

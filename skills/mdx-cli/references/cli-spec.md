@@ -74,11 +74,45 @@ Tokens are auto-refreshed where possible. If token refresh fails, normal API aut
 | `mdx project list [--json]` | none | List assigned projects. |
 | `mdx project summary [-p ID] [--json]` | project optional | Show VM counts, disk/pack resources, and storage usage. |
 | `mdx project select` | interactive | Select and save the default project. |
-| `mdx project show <project-id> [--json]` | required ID | Show project summary. |
+| `mdx project show [project-id] [-p ID] [--json]` | explicit ID, environment, or saved project | Show ID, name, type, applicant, begin, and limit. |
+| `mdx project resources [-p ID] [--json]` | project optional | CPU/GPU requested, used, current/future allocation, Rmin, storage, and global IP resources. |
+| `mdx project users [-p ID] [--json]` | `--page`, `--page-size`, `--ordering`, `--username`, `--email`, `--auth` | List project users; all pages by default. |
+| `mdx project points [-p ID] [--json]` | project optional | Last consumption time, purchased/used/remaining points, and expiration dates. |
+| `mdx project usage [-p ID]` | `--days`, `--start`, `--end`, `--lang`, `--json`, `--html`, `--output` / `-o` | Read resource usage and consumed points through a report POST. |
+| `mdx project overview [-p ID] [--json]` | `--kind all\|resource\|resource_list\|vm\|spot_vm\|guarantee_vm` | Dashboard resources and VM counts; all five sections by default. |
 | `mdx project storage <project-id> [--json]` | required ID | Show storage information. |
 | `mdx project keys <project-id> [--json]` | required ID | List access keys. |
 
-`project select` flattens nested projects in organizations and saves the selected UUID.
+`project list --json` retains tenant `name` and nested `projects[]`; text output includes the tenant beside each project.
+Tenants do not need a UUID. Empty tenants are not selectable. Legacy flat project responses are also accepted.
+`project select` flattens nested projects in organizations and saves the selected project UUID.
+
+`project users` defaults to all pages, fetched in batches of 100. Use `--page N` (1-based) for one page;
+`--page-size` accepts 1–100. JSON contains `count` and `results`; single-page mode also retains server pagination
+metadata and the server's total count, while all-page mode sets `count` to the number of fetched users.
+Sort/filter strings pass through unchanged. Use `--ordering=-username` for descending order.
+Exact versus partial filter matching is not verified. Point requests have no pagination parameters.
+
+`project usage` defaults to the last 7 days. `--days` accepts 7, 30, 90, or 365 and maps to `input_type` 1–4.
+For a custom range, supply both `--start 'YYYY-MM-DD HH'` and `--end 'YYYY-MM-DD HH'` (`input_type: 0`),
+with end later than start. Custom ranges cannot be combined with `--days`. Hours must be 00–23;
+no timezone conversion is performed. Server timezone and endpoint inclusivity remain unverified.
+The report body language is `--lang jp` (default) or `--lang en`.
+
+Normal usage output displays HTML tables. JSON includes the original response plus `tables`, each containing
+`caption`, `headers`, and `rows`. Row/column spans are expanded by duplicating cell text; multiple header rows
+are joined with ` / `. Tables without headers have `headers: []`. All cells, including totals and numeric values,
+remain strings to preserve units and precision. Convert only known numeric columns downstream.
+`--html` writes raw HTML to stdout; `--output PATH` saves UTF-8 HTML. These two options and `--json` are mutually
+exclusive. `err_msg` and empty HTML fail with exit status 1. A report without tables fails in text mode;
+HTML and JSON modes still allow inspecting it.
+
+API paths use `/api/project/{id}/summary/`, `/resources/`, `/point/`, and POST `/resource_usage/`.
+Users use GET `/api/user/project/{id}/`. Overview sections use GET `/api/project/{id}/overview/{kind}/`.
+The standard client sends `Authorization: JWT <token>`, `Content-Type: application/json`, and
+`Accept-Language: ja`. `MDX_BASE_URL` stays the origin URL without `/api`.
+These contracts are based on the supplied portal implementation; tests use synthetic responses, not live captures.
+Supplemental overview schemas and actual report HTML layout have not been verified against the live service.
 
 ## VM Inventory
 
