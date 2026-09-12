@@ -9,7 +9,9 @@ from rich.text import Text
 from mdx_cli.api.spinner import stop_active_spinner
 from mdx_cli.console import console
 from mdx_cli.models.project import UsageTable
-from mdx_cli.output.tables import PROJECT_PACK_FIELDS, PROJECT_RESOURCE_FIELDS
+from mdx_cli.output.tables import (
+    PROJECT_OVERVIEW_FIELDS, PROJECT_OVERVIEW_SECTIONS, PROJECT_PACK_FIELDS, PROJECT_RESOURCE_FIELDS,
+)
 
 
 def _display(value) -> str:
@@ -36,6 +38,29 @@ def render_resources(data: dict) -> None:
                       Text(_display(data.get(f"gpu_pack{suffix}"))))
     console.print(table)
     render_fields(data, PROJECT_RESOURCE_FIELDS)
+
+
+def _overview_rows(value, labels: tuple[str, ...] = ()):
+    """未知フィールドや配列も省略せず、入れ子を項目ごとの行へ展開する。"""
+    if isinstance(value, dict) and value:
+        for key, child in value.items():
+            yield from _overview_rows(child, (*labels, PROJECT_OVERVIEW_FIELDS.get(key, key)))
+    elif isinstance(value, list) and value:
+        for index, child in enumerate(value, 1):
+            yield from _overview_rows(child, (*labels, str(index)))
+    else:
+        text = "なし" if isinstance(value, (dict, list)) else _display(value)
+        yield " / ".join(labels) or "値", text
+
+
+def render_overview(sections: dict) -> None:
+    stop_active_spinner()
+    for kind, data in sections.items():
+        console.print(Text(PROJECT_OVERVIEW_SECTIONS.get(kind, kind), style="bold"))
+        table = Table("項目", "値")
+        for label, value in _overview_rows(data):
+            table.add_row(Text(label), Text(value))
+        console.print(table)
 
 
 def _span(cell: Tag, name: str) -> int:

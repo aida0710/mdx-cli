@@ -36,3 +36,18 @@ def test_nested_table_is_not_counted_twice_and_scripts_are_removed():
     """)
     assert len(tables) == 1
     assert tables[0].rows == [["outer inner", "1"]]
+
+
+def test_overview_preserves_unknown_nested_fields_and_lists(capsys):
+    from mdx_cli.output.project import render_overview
+
+    render_overview({"resource_list": {
+        "future": [{"state": "[red]literal", "count": 2}], "empty": [], "missing": None,
+    }})
+    output = capsys.readouterr().out
+    assert "割当資源" in output
+    assert "future / 1 / state" in output
+    assert "[red]literal" in output
+    assert "future / 1 / count" in output
+    assert "empty" in output and "なし" in output
+    assert "missing" in output and "—" in output

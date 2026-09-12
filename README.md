@@ -188,8 +188,9 @@ mdx project select     # 使用するプロジェクトを選択（以降 --proj
 mdx project show       # ID・名称・種別・申請者・利用期間（show <id> も使用可）
 mdx project resources  # CPU/GPU要求量・使用量・割当量・翌月割当量・Rminなど
 mdx project users      # ユーザー一覧（全ページ取得）
-mdx project points     # 購入・利用・残ポイントと利用期限
+mdx project points     # 合計残高・購入・利用・残ポイントと利用期限
 mdx project usage      # 最近7日間の資源使用量・消費ポイント
+mdx project usage --hours 24  # 直近の正時（JST）までの24時間
 mdx project overview   # ダッシュボードの資源概要・一覧・VM状態別件数
 mdx project storage <id>  # ストレージ情報
 mdx project keys <id>  # アクセスキー一覧
@@ -216,14 +217,25 @@ mdx project points --json
 `auth` は認証方式（例: `学認`・`mdx認証基盤`）です。
 フィルター値はそのままAPIへ渡します。完全一致・部分一致の扱いは未確認です。
 `points` はページ条件を付けず全件を取得し、最終消費処理日時 `lastConsumed` と各ポイントの値を保持します。
+通常表示では明細とは別に **合計残高** を表示します。合計は全明細の `remaining_points` をDecimalで加算した値で、
+期限による除外は行いません。JSONには文字列の `total_remaining_points` を追加します。
+残ポイントに欠損・数値以外の値があれば部分合計は表示せず、合計は「算出できません」（JSONでは `null`）になります。
 
 資源利用レポートは閲覧用のPOSTで取得します。
 `--days` は7・30・90・365に対応し、省略時は7日です。任意期間は `--start` と `--end` の両方を指定します。
 日時は厳密な `YYYY-MM-DD HH`（00〜23時）で、終了を開始より後にしてください。`--days` との併用はできません。
 日時をタイムゾーン変換せず送信します。サーバー側のタイムゾーンと期間端点の包含関係は未確認です。
 
+時間数で指定する場合は `--hours 24` を使います。JSTの現在時刻を正時へ切り捨て、その24時間前からの
+期間を任意期間APIへ送ります。たとえばJSTで9月12日14:37に実行すると、9月11日14:00〜9月12日14:00です。
+分単位で「現在まで」の指定はできません。通常表示に対象期間を表示し、JSONには `period`
+（`start`・`end`・`hours`・`timezone: "JST"`）を追加します。
+`--hours` は1以上で、`--days`・`--start`・`--end` と併用できません。
+
 ```bash
 mdx project usage --days 30
+mdx project usage --hours 24
+mdx project usage --hours 48 --json
 mdx project usage --start '2026-09-05 00' --end '2026-09-12 00'
 mdx project usage --days 90 --lang en --json
 mdx project usage --html > usage.html
@@ -241,7 +253,8 @@ APIの `err_msg` や空HTMLは終了コード1となります。表がない場�
 
 `overview --kind` は `resource`・`resource_list`・`vm`・`spot_vm`・`guarantee_vm`・`all`（既定）に対応します。
 単一種別のJSONはそのAPIのレスポンス、`all` のJSONは各種別をキーにしたオブジェクトです。
-補足APIは取得したフィールド名・値をそのまま表示します。
+通常表示では資源概要・割当資源・専有VM・スポットVM・起動保証VMに分け、入れ子の値を項目ごとの行へ展開します。
+既知の項目名は日本語で表示し、未知の項目も省略せず表示します。JSON出力の構造は従来どおりです。
 
 ```bash
 mdx project overview --kind resource_list --json

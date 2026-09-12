@@ -56,6 +56,22 @@ PROJECT_POINT_COLUMNS: list[tuple[str, str]] = [
     ("利用ポイント", "used_points"), ("残ポイント", "remaining_points"), ("利用期限", "expiration_date"),
 ]
 
+PROJECT_OVERVIEW_SECTIONS: dict[str, str] = {
+    "resource": "資源概要", "resource_list": "割当資源",
+    "vm": "専有VM", "spot_vm": "スポットVM", "guarantee_vm": "起動保証VM",
+}
+
+PROJECT_OVERVIEW_FIELDS: dict[str, str] = {
+    "uuid": "プロジェクトID", "type": "プロジェクト種別",
+    "cpu_pack": "CPUパック", "gpu_pack": "GPUパック", "disk_size": "ディスク（GB）",
+    "used": "使用量", "unused": "未使用量",
+    "cpu_pack_max_current": "CPUパック / 現在割当", "gpu_pack_max_current": "GPUパック / 現在割当",
+    "cpu_pack_future": "CPUパック / 翌月割当", "gpu_pack_future": "GPUパック / 翌月割当",
+    "general_purpose_node_current": "汎用ノード / 現在割当", "use_gpu_node_current": "GPUノード / 現在割当",
+    "general_purpose_node_future": "汎用ノード / 翌月割当", "use_gpu_node_future": "GPUノード / 翌月割当",
+    "power_on": "稼働中", "power_off": "停止", "detached": "切り離し", "deallocated": "未割当", "total": "合計",
+}
+
 SEGMENT_COLUMNS: list[tuple[str, str]] = [
     ("UUID", "uuid"),
     ("セグメント名", "name"),

@@ -1,4 +1,5 @@
 from enum import StrEnum
+from decimal import Decimal, InvalidOperation
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -58,6 +59,20 @@ class ProjectPoints(BaseModel):
     model_config = ConfigDict(extra="allow")
     lastConsumed: str | None = None
     results: list[ProjectPoint]
+
+    @property
+    def total_remaining_points(self) -> Decimal | None:
+        """全明細の残ポイント合計。不明な値があれば部分合計を返さない。"""
+        total = Decimal("0.00")
+        for point in self.results:
+            try:
+                remaining = Decimal(str(getattr(point, "remaining_points", None)))
+            except InvalidOperation:
+                return None
+            if not remaining.is_finite():
+                return None
+            total += remaining
+        return total
 
 
 class ResourceUsage(BaseModel):
