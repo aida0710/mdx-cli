@@ -77,8 +77,8 @@ Tokens are auto-refreshed where possible. If token refresh fails, normal API aut
 | `mdx project show [project-id] [-p ID] [--json]` | explicit ID, environment, or saved project | Show ID, name, type, applicant, begin, and limit. |
 | `mdx project resources [-p ID] [--json]` | project optional | CPU/GPU requested, used, current/future allocation, Rmin, storage, and global IP resources. |
 | `mdx project users [-p ID] [--json]` | `--page`, `--page-size`, `--ordering`, `--username`, `--email`, `--auth` | List project users; all pages by default. |
-| `mdx project points [-p ID] [--json]` | project optional | Last consumption time, purchased/used/remaining points, and expiration dates. |
-| `mdx project usage [-p ID]` | `--days`, `--start`, `--end`, `--lang`, `--json`, `--html`, `--output` / `-o` | Read resource usage and consumed points through a report POST. |
+| `mdx project points [-p ID] [--json]` | project optional | Total remaining balance, last consumption time, purchased/used/remaining points, and expiration dates. |
+| `mdx project usage [-p ID]` | `--days`, `--hours`, `--start`, `--end`, `--lang`, `--json`, `--html`, `--output` / `-o` | Read resource usage and consumed points through a report POST. |
 | `mdx project overview [-p ID] [--json]` | `--kind all\|resource\|resource_list\|vm\|spot_vm\|guarantee_vm` | Dashboard resources and VM counts; all five sections by default. |
 | `mdx project storage <project-id> [--json]` | required ID | Show storage information. |
 | `mdx project keys <project-id> [--json]` | required ID | List access keys. |
@@ -94,11 +94,26 @@ Sort/filter strings pass through unchanged. Use `--ordering=-username` for desce
 Exact versus partial filter matching is not verified. Point requests have no pagination parameters.
 The user `auth` field is an authentication method (e.g. `学認` or `mdx認証基盤`), not a permission role.
 
+`project points` displays a separate total remaining balance, summing every `remaining_points` value with Decimal.
+No expiration filtering is applied. JSON adds `total_remaining_points` as a decimal string.
+If any balance is missing, nonnumeric, or nonfinite, the total is unavailable (`null` in JSON), not a partial sum.
+
+Normal `project overview` output expands nested objects and arrays into individual field/value rows grouped by
+resource overview, allocated resources, dedicated VMs, spot VMs, and guaranteed VMs. Known keys use Japanese labels;
+unknown keys remain visible. JSON retains the original response structure.
+
 `project usage` defaults to the last 7 days. `--days` accepts 7, 30, 90, or 365 and maps to `input_type` 1–4.
 For a custom range, supply both `--start 'YYYY-MM-DD HH'` and `--end 'YYYY-MM-DD HH'` (`input_type: 0`),
 with end later than start. Custom ranges cannot be combined with `--days`. Hours must be 00–23;
 no timezone conversion is performed. Server timezone and endpoint inclusivity remain unverified.
 The report body language is `--lang jp` (default) or `--lang en`.
+
+Use `--hours 24` for the 24 hours ending at the latest whole hour in JST (UTC+09:00), independent of the OS timezone.
+For example, at September 12 14:37 JST it submits September 11 14:00 through September 12 14:00 with `input_type: 0`.
+Minute-level rolling windows are not supported by the API contract. Any positive integer hour count is accepted;
+`--hours` cannot be combined with `--days`, `--start`, or `--end`.
+Text output shows the actual submitted period. JSON adds `period` with `start`, `end`, `hours`, and `timezone: "JST"`.
+The CLI uses JST to construct the request; server timezone/endpoint inclusivity are still not independently established.
 
 Normal usage output displays HTML tables. JSON includes the original response plus `tables`, each containing
 `caption`, `headers`, and `rows`. Row/column spans are expanded by duplicating cell text; multiple header rows

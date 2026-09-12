@@ -1,6 +1,7 @@
 """CLIからHTTP境界まで、合成レスポンスで取得・表示の契約を検証する。"""
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -112,6 +113,98 @@ def test_points_show_last_consumed_and_empty_results():
     result = runner.invoke(app, ["points", "-p", "p1"])
     assert result.exit_code == 0, result.output
     assert "2026-09-12 00:00:00" in result.output
+    assert "合計残高: 0.00 ポイント" in result.output
+
+
+@respx.mock
+def test_points_total_balance_uses_exact_decimal_arithmetic():
+    payload = {"lastConsumed": "2026-09-12 14:00", "results": [
+        {"point_id": "1", "remaining_points": "345302.24"},
+        {"point_id": "2", "remaining_points": "0.10"},
+        {"point_id": "3", "remaining_points": "0.20"},
+    ]}
+    respx.get("/api/project/saved/point/").respond(200, json=payload)
+    result = runner.invoke(app, ["points"])
+    assert result.exit_code == 0, result.output
+    assert "合計残高: 345,302.54 ポイント" in result.stdout
+    result = runner.invoke(app, ["points", "--json"])
+    data = json.loads(result.stdout)
+    assert data["total_remaining_points"] == "345302.54"
+    assert data["results"] == payload["results"]
+
+
+@respx.mock
+@pytest.mark.parametrize("value", [None, "", "unknown", "NaN", "Infinity"])
+def test_points_invalid_balance_does_not_show_a_partial_total(value):
+    respx.get("/api/project/saved/point/").respond(200, json={"results": [
+        {"point_id": "1", "remaining_points": "100.00"},
+        {"point_id": "2", "remaining_points": value},
+    ]})
+    result = runner.invoke(app, ["points"])
+    assert result.exit_code == 0, result.output
+    assert "合計残高: 算出できません" in result.stdout
+    result = runner.invoke(app, ["points", "--json"])
+    assert json.loads(result.stdout)["total_remaining_points"] is None
+
+
+@respx.mock
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_usage_last_24_hours_ends_on_latest_jst_hour(mocker, json_mode):
+    real_datetime = datetime
+    clock = mocker.patch("mdx_cli.commands.project.datetime", wraps=real_datetime)
+    clock.now.return_value = real_datetime(2026, 9, 12, 0, 37, 42, tzinfo=timezone(timedelta(hours=9)))
+    route = respx.post("/api/project/saved/resource_usage/").respond(200, json={"html": REPORT_HTML})
+    result = runner.invoke(app, ["usage", "--hours", "24", *( ["--json"] if json_mode else [])])
+    assert result.exit_code == 0, result.output
+    assert json.loads(route.calls[0].request.content) == {
+        "input_type": 0, "start": "2026-09-11 00", "end": "2026-09-12 00", "lang": "jp",
+    }
+    assert clock.now.call_args.args[0].utcoffset(None) == timedelta(hours=9)
+    if json_mode:
+        data = json.loads(result.stdout)
+        assert data["period"] == {"start": "2026-09-11 00", "end": "2026-09-12 00", "hours": 24, "timezone": "JST"}
+        assert data["html"] == REPORT_HTML
+    else:
+        assert "2026-09-11 00:00" in result.stdout
+        assert "2026-09-12 00:00" in result.stdout
+        assert "24時間" in result.stdout and "JST" in result.stdout
+
+
+@pytest.mark.parametrize("args", [
+    ["usage", "--hours", "0"], ["usage", "--hours", "-1"],
+    ["usage", "--hours", "24", "--days", "7"],
+    ["usage", "--hours", "24", "--start", "2026-09-11 00"],
+    ["usage", "--hours", "24", "--end", "2026-09-12 00"],
+])
+def test_usage_hours_conflicts_fail_before_api(args, mock_client):
+    result = runner.invoke(app, args)
+    assert result.exit_code == 2, result.output
+    mock_client.assert_not_called()
+
+
+@respx.mock
+def test_overview_text_expands_and_labels_nested_values():
+    respx.get("/api/project/saved/overview/resource/").respond(200, json={
+        "type": "通常", "cpu_pack": {"used": 12, "unused": 34},
+        "disk_size": {"used": 19010.0, "unused": 5990.0},
+    })
+    result = runner.invoke(app, ["overview", "--kind", "resource"])
+    assert result.exit_code == 0, result.output
+    for value in ["資源概要", "プロジェクト種別", "通常", "CPUパック / 使用量", "CPUパック / 未使用量", "12", "34", "ディスク"]:
+        assert value in result.stdout
+    assert '{"' not in result.stdout
+
+
+@respx.mock
+def test_overview_vm_statuses_are_individual_fields():
+    respx.get("/api/project/saved/overview/spot_vm/").respond(200, json={
+        "power_on": 159, "power_off": 0, "detached": 0, "deallocated": 49, "total": 208,
+    })
+    result = runner.invoke(app, ["overview", "--kind", "spot_vm"])
+    assert result.exit_code == 0, result.output
+    for label in ["スポットVM", "稼働中", "停止", "切り離し", "未割当", "合計", "159", "49", "208"]:
+        assert label in result.stdout
+    assert "power_on" not in result.stdout and '{"' not in result.stdout
 
 
 @respx.mock

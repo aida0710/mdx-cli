@@ -1,6 +1,6 @@
 import json as json_lib
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -26,7 +26,7 @@ from mdx_cli.console import console
 from mdx_cli.credentials.store import get_store
 from mdx_cli.models.project import OverviewKind, Project, ReportLanguage
 from mdx_cli.output.formatting import render, render_json
-from mdx_cli.output.project import parse_usage_tables, render_fields, render_resources, render_usage_tables
+from mdx_cli.output.project import parse_usage_tables, render_fields, render_overview, render_resources, render_usage_tables
 from mdx_cli.output.tables import (
     ACCESS_KEY_COLUMNS, PROJECT_COLUMNS, PROJECT_INFO_FIELDS, PROJECT_POINT_COLUMNS, PROJECT_USER_COLUMNS,
 )
@@ -241,15 +241,33 @@ def points_cmd(
     pid = resolve_project_id(project_id)
     with get_client(silent=json) as client:
         points = get_project_points(client, pid)
+    balance = points.total_remaining_points
     if json:
-        render_json(points)
+        stop_active_spinner()
+        data = points.model_dump(mode="json")
+        data["total_remaining_points"] = format(balance, "f") if balance is not None else None
+        typer.echo(json_lib.dumps(data, ensure_ascii=False, indent=2))
     else:
         stop_active_spinner()
+        if balance is None:
+            console.print("合計残高: 算出できません（残ポイントが数値でない明細があります）", style="yellow")
+        else:
+            console.print(f"合計残高: {balance:,f} ポイント", style="bold green")
         console.print(f"最終消費処理日時: {points.lastConsumed or '—'}", markup=False)
         render(points.results, PROJECT_POINT_COLUMNS, json_mode=False)
 
 
-def _usage_period(days: int | None, start: str | None, end: str | None) -> dict:
+def _usage_period(days: int | None, start: str | None, end: str | None, *, hours: int | None = None) -> dict:
+    if hours is not None:
+        if days is not None or start is not None or end is not None:
+            raise typer.BadParameter("--hours は --days・--start・--end と併用できません")
+        # APIは時単位の指定。OSのタイムゾーンによらずJSTの直近の正時で揃える。
+        end_at = datetime.now(timezone(timedelta(hours=9), "JST")).replace(minute=0, second=0, microsecond=0)
+        try:
+            start_at = end_at - timedelta(hours=hours)
+        except OverflowError:
+            raise typer.BadParameter("--hours の値が大きすぎます")
+        return {"input_type": 0, "start": start_at.strftime("%Y-%m-%d %H"), "end": end_at.strftime("%Y-%m-%d %H")}
     if start is not None or end is not None:
         if days is not None:
             raise typer.BadParameter("--days と --start/--end は併用できません")
@@ -276,6 +294,7 @@ def _usage_period(days: int | None, start: str | None, end: str | None) -> dict:
 def usage_cmd(
     project_id: ProjectOption = None,
     days: int | None = typer.Option(None, help="最近7・30・90・365日（期間未指定時は7日）"),
+    hours: int | None = typer.Option(None, min=1, help="直近の正時（JST）までの時間数（例: 24）"),
     start: str | None = typer.Option(None, help='期間開始 "YYYY-MM-DD HH"（タイムゾーン変換なし）'),
     end: str | None = typer.Option(None, help='期間終了 "YYYY-MM-DD HH"'),
     lang: ReportLanguage = typer.Option(ReportLanguage.jp, help="レポート言語: jp / en"),
@@ -284,7 +303,7 @@ def usage_cmd(
     output: Path | None = typer.Option(None, "--output", "-o", dir_okay=False, help="レポートHTMLの保存先"),
 ) -> None:
     """指定期間の資源使用量・消費ポイント（閲覧用POST）"""
-    params = _usage_period(days, start, end)
+    params = _usage_period(days, start, end, hours=hours)
     if sum([json, html, output is not None]) > 1:
         raise typer.BadParameter("--json・--html・--output はいずれか1つを指定してください")
     pid = resolve_project_id(project_id)
@@ -308,8 +327,12 @@ def usage_cmd(
         if json:
             data = report.model_dump(mode="json")
             data["tables"] = [table.model_dump(mode="json") for table in tables]
+            if hours is not None:
+                data["period"] = {"start": params["start"], "end": params["end"], "hours": hours, "timezone": "JST"}
             typer.echo(json_lib.dumps(data, ensure_ascii=False, indent=2))
         elif tables:
+            if hours is not None:
+                console.print(f"対象期間: {params['start']}:00 ～ {params['end']}:00（{hours}時間・JST）")
             render_usage_tables(tables)
         else:
             fail("レポート内に表が見つかりません。--html または --output でHTMLを確認してください", stderr=True)
@@ -333,9 +356,7 @@ def overview_cmd(
     if json:
         typer.echo(json_lib.dumps(data, ensure_ascii=False, indent=2))
     else:
-        # 補足APIのスキーマは未確定のため、フィールド名と値をそのまま表示する。
-        values = data if isinstance(data, dict) else {str(i): item for i, item in enumerate(data, 1)}
-        render_fields(values, [(key, key) for key in values])
+        render_overview(data if kind == OverviewKind.all else {kind.value: data})
 
 
 @app.command()
