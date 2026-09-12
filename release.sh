@@ -65,9 +65,9 @@ assert_version_sync() {
   actual_project=$(project_version)
   actual_module=$(module_version)
   actual_lock=$(lock_version)
-  [ "$actual_project" = "$expected" ] || die "pyproject.tomlは$actual_projectです（期待: $expected）"
-  [ "$actual_module" = "$expected" ] || die "__version__は$actual_moduleです（期待: $expected）"
-  [ "$actual_lock" = "$expected" ] || die "uv.lockは$actual_lockです（期待: $expected）"
+  [ "$actual_project" = "$expected" ] || die "pyproject.tomlは${actual_project}です（期待: ${expected}）"
+  [ "$actual_module" = "$expected" ] || die "__version__は${actual_module}です（期待: ${expected}）"
+  [ "$actual_lock" = "$expected" ] || die "uv.lockは${actual_lock}です（期待: ${expected}）"
 }
 
 wait_for_run() {
@@ -92,8 +92,8 @@ wait_for_run() {
     count=$((count + 1))
     sleep 2
   done
-  [ -n "$run_id" ] || die "$labelのGitHub Actions runを120秒以内に確認できませんでした"
-  say "release: $labelを監視します: https://github.com/$REPO/actions/runs/$run_id"
+  [ -n "$run_id" ] || die "${label}のGitHub Actions runを120秒以内に確認できませんでした"
+  say "release: ${label}を監視します: https://github.com/$REPO/actions/runs/$run_id"
   gh run watch "$run_id" --repo "$REPO" --exit-status --interval 10
 }
 
@@ -142,15 +142,15 @@ latest_tag=$(git tag --list 'v*' --sort=-version:refname \
 [ -n "$latest_tag" ] || die "比較対象となる安定版タグがありません"
 latest=${latest_tag#v}
 [ "$current" = "$latest" ] \
-  || die "project version $currentと最新タグ$latest_tagが一致していません"
+  || die "project version ${current}と最新タグ${latest_tag}が一致していません"
 version_gt "$version" "$latest" \
-  || die "$tagは最新タグ$latest_tagより大きくなければなりません"
+  || die "${tag}は最新タグ${latest_tag}より大きくなければなりません"
 
 if git show-ref --verify --quiet "refs/tags/$tag"; then
-  die "$tagはすでに存在します"
+  die "${tag}はすでに存在します"
 fi
 
-say "release: 事前条件OK（$latest_tag → $tag）"
+say "release: 事前条件OK（$latest_tag → ${tag}）"
 if [ "$dry_run" -eq 1 ]; then
   say "release: dry-runのため変更せず終了します"
   exit 0
@@ -162,12 +162,12 @@ gh auth status --hostname github.com >/dev/null 2>&1 \
 
 if [ "$assume_yes" -ne 1 ]; then
   [ -t 0 ] || die "非対話実行では--yesを指定してください"
-  printf '%s' "release: $tagを公開しますか？ [y/N] "
+  printf '%s' "release: ${tag}を公開しますか？ [y/N] "
   read -r answer
   case "$answer" in y|Y|yes|YES) ;; *) die "中止しました" ;; esac
 fi
 
-say "release: versionを$versionへ更新します"
+say "release: versionを${version}へ更新します"
 uv version --no-sync "$version"
 version_tmp=$(mktemp "${TMPDIR:-/tmp}/mdx-cli-version.XXXXXX")
 awk -v version="$version" '
@@ -192,25 +192,25 @@ unexpected=$(git status --porcelain | awk '{ print $2 }' \
 
 git add pyproject.toml src/mdx_cli/__init__.py uv.lock
 git commit \
-  -m "chore(release): $tagを準備" \
-  -m "$tagのversion情報を揃え、公開前検証を完了する。"
+  -m "chore(release): ${tag}を準備" \
+  -m "${tag}のversion情報を揃え、公開前検証を完了する。"
 release_commit=$(git rev-parse HEAD)
 git push origin main
 wait_for_run test.yml "$release_commit" "main CI" main
 
 git tag -a "$tag" \
   -m "mdx-cli $tag" \
-  -m "$tagを公開する。"
+  -m "${tag}を公開する。"
 git push origin "$tag"
 wait_for_run release.yml "$release_commit" "Release CI" "$tag"
 
 assets=$(gh release view "$tag" --repo "$REPO" --json assets --jq '.assets[].name')
 for asset in \
   checksums.txt install.sh install.ps1 \
-  mdx-darwin-arm64 mdx-linux-x86_64 mdx-linux-arm64 mdx-windows-x86_64.exe
+  mdx-darwin-arm64.tar.gz mdx-linux-x86_64.tar.gz mdx-linux-arm64.tar.gz mdx-windows-x86_64.zip
 do
   printf '%s\n' "$assets" | grep -Fx "$asset" >/dev/null \
-    || die "GitHub Releaseに$assetがありません"
+    || die "GitHub Releaseに${asset}がありません"
 done
 release_url=$(gh release view "$tag" --repo "$REPO" --json url --jq '.url')
 say "release: 公開完了 $release_url"
