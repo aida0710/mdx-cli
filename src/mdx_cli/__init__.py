@@ -2,4 +2,4 @@
 
 # リリースタグ（v<version>）の基準。pyproject.toml / uv.lock と一致させる
 # （tests/test_docs.py で検証、不一致だと release ワークフローが落ちる）。
-__version__ = "2.1.1"
+__version__ = "2.2.0"
