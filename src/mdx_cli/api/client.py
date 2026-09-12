@@ -73,6 +73,7 @@ def create_client(
 
     return MDXClient(
         base_url=resolved_base_url,
+        headers={"Content-Type": "application/json", "Accept-Language": "ja"},
         timeout=timeout or settings.request_timeout,
         auth=MDXAuth(token=token, token_save_path=token_save_path, relogin_fn=relogin_fn) if token else None,
         event_hooks=spinner.hooks(),

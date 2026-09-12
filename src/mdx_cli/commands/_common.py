@@ -29,9 +29,9 @@ def is_uuid(value: str) -> bool:
     return bool(_UUID_RE.fullmatch(value))
 
 
-def fail(message: str) -> NoReturn:
+def fail(message: str, *, stderr: bool = False) -> NoReturn:
     """エラーを赤字で表示して終了コード1で抜ける。"""
-    console.print(f"[red]{message}[/red]")
+    (err_console if stderr else console).print(f"[red]{message}[/red]")
     raise typer.Exit(code=1)
 
 
