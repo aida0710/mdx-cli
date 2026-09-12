@@ -209,10 +209,11 @@ JSONは `count` と `results` を含み、単一ページ取得時はAPIの総�
 
 ```bash
 mdx project users --page 1 --page-size 10
-mdx project users --ordering=-username --username 'alice' --email 'example.jp' --auth '0' --json
+mdx project users --ordering=-username --username 'alice' --email 'example.jp' --auth '学認' --json
 mdx project points --json
 ```
 
+`auth` は認証方式（例: `学認`・`mdx認証基盤`）です。
 フィルター値はそのままAPIへ渡します。完全一致・部分一致の扱いは未確認です。
 `points` はページ条件を付けず全件を取得し、最終消費処理日時 `lastConsumed` と各ポイントの値を保持します。
 
@@ -240,7 +241,7 @@ APIの `err_msg` や空HTMLは終了コード1となります。表がない場�
 
 `overview --kind` は `resource`・`resource_list`・`vm`・`spot_vm`・`guarantee_vm`・`all`（既定）に対応します。
 単一種別のJSONはそのAPIのレスポンス、`all` のJSONは各種別をキーにしたオブジェクトです。
-補足APIのスキーマは未確認なので、取得したフィールド名・値をそのまま表示します。
+補足APIは取得したフィールド名・値をそのまま表示します。
 
 ```bash
 mdx project overview --kind resource_list --json
@@ -248,7 +249,10 @@ mdx project overview --kind vm --json
 ```
 
 これらは提示されたポータル画面実装のAPI契約に基づき、合成レスポンスでテストしています。
-実レスポンスの形状・権限差・HTMLレポートの実際の構造は未検証です。
+2026-09-12に通常プロジェクト1件で一覧・詳細・資源・ユーザー・ポイント・全5種の概要APIと、
+最近7日のHTMLレポートの取得・表解析を実APIで確認しました。ほかのプロジェクト種別・権限差は未確認です。
+任意期間 `2026-09-05 00`〜`2026-09-12 00` の英語レポート、HTMLファイル保存、
+ユーザー一覧のページ指定と並べ替えも実行して確認済みです。
 APIの接続先は既定で `https://oprpl.mdx.jp/api`。`MDX_BASE_URL` には既存仕様どおり
 `https://oprpl.mdx.jp`（`/api` なし）を指定します。認証は既存の `Authorization: JWT <token>` を使用し、
 通常のAPIクライアントは `Content-Type: application/json` と `Accept-Language: ja` を送信します。

@@ -96,6 +96,17 @@ def test_users_json_metadata_and_env_project(monkeypatch, mock_client):
 
 
 @respx.mock
+def test_users_auth_column_is_authentication_method():
+    respx.get("/api/user/project/saved/").respond(200, json={"count": 1, "results": [
+        {"uuid": "u1", "username": "example", "email": "user@example.test", "auth": "学認"},
+    ]})
+    result = runner.invoke(app, ["users"])
+    assert result.exit_code == 0, result.output
+    assert "認証方式" in result.output
+    assert "学認" in result.output
+
+
+@respx.mock
 def test_points_show_last_consumed_and_empty_results():
     respx.get("/api/project/p1/point/").respond(200, json={"lastConsumed": "2026-09-12 00:00:00", "results": []})
     result = runner.invoke(app, ["points", "-p", "p1"])
