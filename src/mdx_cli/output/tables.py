@@ -48,7 +48,7 @@ PROJECT_RESOURCE_FIELDS: list[tuple[str, str]] = [
 ]
 
 PROJECT_USER_COLUMNS: list[tuple[str, str]] = [
-    ("UUID", "uuid"), ("ユーザー名", "username"), ("メール", "email"), ("権限", "auth"),
+    ("UUID", "uuid"), ("ユーザー名", "username"), ("メール", "email"), ("認証方式", "auth"),
 ]
 
 PROJECT_POINT_COLUMNS: list[tuple[str, str]] = [

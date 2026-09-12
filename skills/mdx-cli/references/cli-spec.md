@@ -92,6 +92,7 @@ Tenants do not need a UUID. Empty tenants are not selectable. Legacy flat projec
 metadata and the server's total count, while all-page mode sets `count` to the number of fetched users.
 Sort/filter strings pass through unchanged. Use `--ordering=-username` for descending order.
 Exact versus partial filter matching is not verified. Point requests have no pagination parameters.
+The user `auth` field is an authentication method (e.g. `学認` or `mdx認証基盤`), not a permission role.
 
 `project usage` defaults to the last 7 days. `--days` accepts 7, 30, 90, or 365 and maps to `input_type` 1–4.
 For a custom range, supply both `--start 'YYYY-MM-DD HH'` and `--end 'YYYY-MM-DD HH'` (`input_type: 0`),
@@ -111,8 +112,12 @@ API paths use `/api/project/{id}/summary/`, `/resources/`, `/point/`, and POST `
 Users use GET `/api/user/project/{id}/`. Overview sections use GET `/api/project/{id}/overview/{kind}/`.
 The standard client sends `Authorization: JWT <token>`, `Content-Type: application/json`, and
 `Accept-Language: ja`. `MDX_BASE_URL` stays the origin URL without `/api`.
-These contracts are based on the supplied portal implementation; tests use synthetic responses, not live captures.
-Supplemental overview schemas and actual report HTML layout have not been verified against the live service.
+These contracts are based on the supplied portal implementation; automated tests use synthetic responses.
+On 2026-09-12, live execution confirmed assigned projects, summary, resources, users, points, all five overview
+sections, and seven-day report HTML/table extraction for one normal project. Other project types and permission
+differences remain unverified.
+The custom range `2026-09-05 00` to `2026-09-12 00` in English, HTML file output, and explicit user pagination
+with ordering were also exercised successfully.
 
 ## VM Inventory
 

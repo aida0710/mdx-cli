@@ -217,7 +217,7 @@ def users_cmd(
     ordering: str | None = typer.Option(None, help="ソート項目（例: --ordering=-username）"),
     username: str | None = typer.Option(None, help="ユーザー名フィルター（照合方法はサーバー依存）"),
     email: str | None = typer.Option(None, help="メールフィルター（照合方法はサーバー依存）"),
-    auth: str | None = typer.Option(None, help="権限フィルター"),
+    auth: str | None = typer.Option(None, help="認証方式フィルター"),
     json: bool = typer.Option(False, "--json", help="総件数countとユーザー配列resultsをJSON出力"),
 ) -> None:
     """プロジェクトのユーザー一覧"""
