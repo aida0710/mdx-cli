@@ -72,6 +72,9 @@ mdx --version
 
 ## Skill としてインストール
 
+AIエージェントによる、プロジェクト情報の変更を伴う申請系操作とMDX運営側の対応を発生させる操作はすべて禁止です。
+詳細は [スキルの禁止事項](skills/mdx-cli/SKILL.md#prohibited-operations) を参照してください。
+
 Codex / Claude Code の skill として使う場合:
 
 ```bash
