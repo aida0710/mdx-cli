@@ -69,6 +69,10 @@ Tokens are auto-refreshed where possible. If token refresh fails, normal API aut
 
 ## Projects
 
+Project information changes through applications/requests and all operations requiring MDX staff action
+are prohibited; see [Prohibited Operations](../SKILL.md#prohibited-operations).
+Project commands read information or save the selected project locally.
+
 | Command | Arguments/options | Purpose |
 |---|---|---|
 | `mdx project list [--json]` | none | List assigned projects. |
