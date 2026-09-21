@@ -11,6 +11,20 @@ Use this skill to operate the `mdx` command safely and accurately. The CLI contr
 
 For exact command syntax, options, and behavior, read [references/cli-spec.md](references/cli-spec.md).
 
+## Prohibited Operations
+
+- Never perform any application/request operation that changes MDX project information.
+  This includes creating, submitting, modifying, resubmitting, withdrawing, or cancelling an application.
+- Never initiate any operation that creates review, approval, or manual work for MDX operators,
+  administrators, or support staff. Examples include project changes, resource/quota increase requests,
+  usage-period extensions, and sending support inquiries or opening support tickets.
+- This prohibition applies through every route: the CLI, direct API calls, the web portal, scripts,
+  email, and other tools. Do not use another route when the CLI has no corresponding command.
+- Ordinary execution confirmation does not lift this prohibition.
+  If an operation's effect on MDX staff is unclear, investigate read-only; do not test it by submitting.
+- Read-only inspection, local project selection, and authorized self-service VM/network operations
+  that require no MDX staff action remain subject to the normal safety rules below.
+
 ## Safety Rules
 
 - Confirm the user is on MDX VPN or inside an MDX VM before commands that contact `oprpl.mdx.jp` or `mdxidm.mdx.jp`.
