@@ -138,7 +138,12 @@ if [ "$bundle" = 1 ]; then
   chmod 0755 "$dir/.mdx-runtime" "$runtime"
   mv "$tmp/unpacked/mdx" "$runtime/bundle"
   chmod 0755 "$runtime/bundle/mdx"
-  "$runtime/bundle/mdx" --version > /dev/null 2>&1 || die "新版を起動できないため既存版を維持します"
+  if ! "$runtime/bundle/mdx" --version > "$tmp/startup.log" 2>&1; then
+    # glibc の不足などの原因は起動時の出力にしか現れないため、そのまま見せる。
+    sed 's/^/  /' "$tmp/startup.log" >&2
+    [ ! -e "$dir/mdx" ] || die "新版を起動できないため既存版を維持します"
+    die "新版を起動できないため導入を中止しました"
+  fi
   link_tmp=$(mktemp "$dir/.mdx-link.XXXXXX")
   rm -f "$link_tmp"
   ln -s "$runtime/bundle/mdx" "$link_tmp"
