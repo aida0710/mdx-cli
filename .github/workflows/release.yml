@@ -58,15 +58,26 @@ jobs:
             artifact: mdx-darwin-arm64
           - os: ubuntu-24.04
             artifact: mdx-linux-x86_64
+            managed-python: true
           - os: ubuntu-24.04-arm
             artifact: mdx-linux-arm64
+            managed-python: true
           - os: windows-latest
             artifact: mdx-windows-x86_64
     runs-on: ${{ matrix.os }}
+    env:
+      UV_PYTHON: "3.13"
+      # setup-python の Linux 版 Python はランナーの glibc（24.04 は 2.39）向けにビルドされており、
+      # 同梱した libpython が Ubuntu 22.04 で読み込めない。Linux は古い glibc 向けにビルドされた
+      # uv 管理の Python（python-build-standalone）だけを使う。
+      UV_PYTHON_PREFERENCE: ${{ matrix.managed-python && 'only-managed' || 'managed' }}
+      # Linux 版の動作条件の下限。README の「glibc 2.35 以降（Ubuntu 22.04 以降）」と揃える。
+      OLDEST_SUPPORTED_LINUX_IMAGE: ubuntu:22.04
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
+        if: ${{ !matrix.managed-python }}
         with:
           python-version: "3.13"
 
@@ -80,13 +91,20 @@ jobs:
         run: uv run pyinstaller --onedir --name mdx src/mdx_cli/main.py
 
       - name: Package application bundle
-        run: python scripts/package_release.py ${{ matrix.artifact }}
+        run: uv run --no-sync python scripts/package_release.py ${{ matrix.artifact }}
 
       - name: Smoke test installer (Unix)
         if: runner.os != 'Windows'
         env:
           MDX_TEST_BUNDLE_ARCHIVE: ${{ github.workspace }}/dist/${{ matrix.artifact }}.tar.gz
         run: uv run --no-sync pytest tests/test_installers.py -k real_release_bundle -q
+
+      # ランナーより古い glibc の環境で起動できることを、ビルドした実物で確かめる。
+      - name: Smoke test on oldest supported Linux
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm -v "$PWD/dist/mdx:/opt/mdx:ro" "$OLDEST_SUPPORTED_LINUX_IMAGE" \
+            sh -c '/opt/mdx/mdx --version && /opt/mdx/mdx --help > /dev/null'
 
       - name: Smoke test installer (Windows)
         if: runner.os == 'Windows'

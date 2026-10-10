@@ -11,6 +11,8 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# v2.3.0 の Linux 版が Ubuntu 22.04 で出した失敗と同じ種類の出力。
+BUNDLE_STARTUP_ERROR = "libm.so.6: version GLIBC_2.38 not found"
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -231,7 +233,7 @@ def _archive_downloads(tmp_path, env, fake_bin, *, broken=False):
     bundle = tmp_path / 'bundle' / 'mdx'
     (bundle / '_internal').mkdir(parents=True)
     (bundle / '_internal' / 'version').write_text('2.1.1\n')
-    _write_executable(bundle / 'mdx', 'exit 9\n' if broken else
+    _write_executable(bundle / 'mdx', f'echo "{BUNDLE_STARTUP_ERROR}" >&2\nexit 9\n' if broken else
                       'cat "$(dirname "$(realpath "$0")")/_internal/version"\n')
     archive = tmp_path / 'release.tar.gz'
     with tarfile.open(archive, 'w:gz') as tar:
@@ -290,6 +292,17 @@ def test_install_sh_preserves_existing_install_on_bad_bundle(tmp_path, failure):
     result = _run_install_sh(env)
     assert result.returncode != 0
     assert subprocess.check_output([str(target)], text=True).strip() == 'old-version'
+
+
+def test_install_sh_shows_startup_error_and_stops_when_new_bundle_cannot_start(tmp_path):
+    env, fake_bin = _base_env(tmp_path)
+    _archive_downloads(tmp_path, env, fake_bin, broken=True)
+    result = _run_install_sh(env)
+    assert result.returncode != 0
+    assert BUNDLE_STARTUP_ERROR in result.stderr
+    assert '導入を中止しました' in result.stderr
+    assert '既存版を維持' not in result.stderr, 'There is no previous install to keep'
+    assert not (Path(env['MDX_INSTALL_DIR']) / 'mdx').exists()
 
 
 @pytest.mark.skipif(not os.environ.get('MDX_TEST_BUNDLE_ARCHIVE'), reason='Release bundle not provided')
