@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from click.core import ParameterSource
 from rich.markup import escape
 
 from mdx_cli.api.spinner import stop_active_spinner
@@ -182,8 +181,9 @@ def show(
     json: bool = typer.Option(False, "--json", help="JSON出力"),
 ) -> None:
     """プロジェクト情報（ID・名称・種別・申請者・利用期間）"""
+    # typer 0.26以降は click を内部に取り込み、click.core.ParameterSource とは別の列挙型を返すため名前で比べる。
     if (project_id and project_option and project_id != project_option
-            and ctx.get_parameter_source("project_option") == ParameterSource.COMMANDLINE):
+            and ctx.get_parameter_source("project_option").name == "COMMANDLINE"):
         raise typer.BadParameter("引数と --project-id に異なるIDが指定されています")
     pid = resolve_project_id(project_id or project_option)
     client = get_client(silent=json)
