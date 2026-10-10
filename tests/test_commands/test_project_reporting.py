@@ -320,6 +320,13 @@ def test_show_explicit_id_overrides_env(monkeypatch):
 
 
 @respx.mock
+def test_show_rejects_different_ids_in_argument_and_option():
+    result = runner.invoke(app, ["show", "p1", "--project-id", "p2"])
+    assert result.exit_code == 2, result.output
+    assert "異なるID" in result.stderr
+
+
+@respx.mock
 def test_show_saved_project():
     respx.get("/api/project/saved/summary/").respond(200, json={"uuid": "saved", "name": "Saved"})
     result = runner.invoke(app, ["show", "--json"])
