@@ -1,15 +1,22 @@
 # MDX CLI Specification
 
-This reference describes the `mdx` CLI implemented by `mdx_cli.main:app`.
+This reference describes the `mdx` CLI implemented by `mdx_cli.main:app` (entry point `mdx_cli.entry:cli`).
 
 ## Runtime
 
-- Package script: `mdx = mdx_cli.main:app`
+- Package script: `mdx = mdx_cli.entry:cli` (answers shell completion from the saved command tree without loading the app)
 - Python: 3.13+
 - Install locally: `uv tool install .`
 - Update locally: `git pull && uv tool install . --force`
 - Must run from MDX internal network, MDX VPN, or an MDX VM.
 - API base: `https://oprpl.mdx.jp`
+
+## Interactive Prompts
+
+- Commands that ask several items (`vm deploy`, `vm reconfigure`, `vm rename`, `network acl add/edit`, `network dnat add/edit`, `auth login`, `auth otp`) go back to the previous item on Esc; earlier answers become the defaults.
+- Their final confirmation is a choice of 実行する / 直す / 中止する. 直す re-asks from the chosen item to the end.
+- Invalid interactive input (missing key file, name collision, wrong OTP, bad mask) is re-asked instead of exiting. Values given as options are still validated and exit on error.
+- `vm reconfigure` shuts down running VMs only after the final confirmation.
 - SSO IdP: `mdxidm.mdx.jp`
 
 ## Global Options

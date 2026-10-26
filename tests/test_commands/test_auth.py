@@ -36,6 +36,28 @@ def test_auth_login_success_new_user():
                 store.save_token.assert_called_once_with("jwt-token-123")
 
 
+def test_auth_login_escape_on_password_goes_back_to_username():
+    """パスワードで Esc を押すと、前に入れたユーザー名を初期値にしてユーザー名へ戻る"""
+    from mdx_cli.commands._prompt_steps import BACK
+
+    with patch(
+        "mdx_cli.commands.auth.sso_login",
+        side_effect=_sso_result_after_requesting_otp("jwt-token-123"),
+    ):
+        with patch("mdx_cli.commands.auth.get_store") as MockStore:
+            store = MockStore.return_value
+            store.load_credentials.return_value = None
+            store.load_totp_secret.return_value = None
+            with patch("mdx_cli.commands.auth.questionary") as mock_q:
+                mock_q.text.return_value.unsafe_ask.side_effect = ["usr", "user", "123456"]
+                mock_q.password.return_value.unsafe_ask.side_effect = [BACK, "secret"]
+                result = runner.invoke(app, ["login"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_q.text.call_args_list[1].kwargs["default"] == "usr"
+    store.save_credentials.assert_called_once_with("user", "secret")
+
+
 def test_auth_login_defaults_to_encrypted_file():
     """オプションなしのloginはKeychainを選ばない。"""
     with patch(
@@ -187,17 +209,22 @@ def test_auth_otp_registers_secret():
             store.save_totp_secret.assert_called_once_with("saved_user", TOTP_SECRET)
 
 
-def test_auth_otp_rejects_invalid_secret():
-    """Base32として不正なシークレットは保存しない（ログイン時まで失敗を持ち越さない）"""
+def test_auth_otp_reasks_invalid_secret():
+    """Base32として不正なシークレットは保存せず、理由を出して聞き直す（ログイン時まで失敗を持ち越さない）"""
     with patch("mdx_cli.commands.auth.get_store") as MockStore:
         store = MockStore.return_value
         store.load_credentials.return_value = ("saved_user", "saved_pass")
         store.load_totp_secret.return_value = None
-        with patch("mdx_cli.commands.auth.questionary") as mock_q:
-            mock_q.password.return_value.unsafe_ask.return_value = "not-base32!"
+        with (
+            patch("mdx_cli.commands.auth.questionary") as mock_q,
+            patch("mdx_cli.commands.auth.verify_totp", return_value=True),
+        ):
+            mock_q.password.return_value.unsafe_ask.side_effect = ["not-base32!", TOTP_SECRET]
             result = runner.invoke(app, ["otp"])
-            assert result.exit_code == 1
-            store.save_totp_secret.assert_not_called()
+
+    assert result.exit_code == 0, result.output
+    assert "シークレットが不正です" in result.output
+    store.save_totp_secret.assert_called_once_with("saved_user", TOTP_SECRET)
 
 
 def test_auth_otp_delete():
@@ -276,17 +303,22 @@ def test_auth_otp_reregisters_when_already_registered():
             store.delete_totp_secret.assert_not_called()
 
 
-def test_auth_otp_rejects_empty_secret():
-    """空入力は保存しない（空Base32はデコードできてしまうため明示的に弾く）"""
+def test_auth_otp_reasks_empty_secret():
+    """空入力は保存せず聞き直す（空Base32はデコードできてしまうため明示的に弾く）"""
     with patch("mdx_cli.commands.auth.get_store") as MockStore:
         store = MockStore.return_value
         store.load_credentials.return_value = ("saved_user", "saved_pass")
         store.load_totp_secret.return_value = None
-        with patch("mdx_cli.commands.auth.questionary") as mock_q:
-            mock_q.password.return_value.unsafe_ask.return_value = ""
+        with (
+            patch("mdx_cli.commands.auth.questionary") as mock_q,
+            patch("mdx_cli.commands.auth.verify_totp", return_value=True),
+        ):
+            mock_q.password.return_value.unsafe_ask.side_effect = ["", TOTP_SECRET]
             result = runner.invoke(app, ["otp"])
-            assert result.exit_code == 1
-            store.save_totp_secret.assert_not_called()
+
+    assert result.exit_code == 0, result.output
+    assert "シークレットを入力してください" in result.output
+    store.save_totp_secret.assert_called_once_with("saved_user", TOTP_SECRET)
 
 
 def test_auth_otp_requires_login():
@@ -324,23 +356,44 @@ def test_auth_otp_verifies_authenticator_code_without_printing_generated_otp():
     store.save_totp_secret.assert_called_once_with("saved_user", TOTP_SECRET)
 
 
-def test_auth_otp_rejects_mismatched_authenticator_code():
+def test_auth_otp_reasks_mismatched_authenticator_code():
+    """認証アプリのOTPが合わなければ保存せず、合うまで聞き直す"""
     with patch("mdx_cli.commands.auth.get_store") as MockStore:
         store = MockStore.return_value
         store.load_credentials.return_value = ("saved_user", "saved_pass")
         store.load_totp_secret.return_value = None
         with (
             patch("mdx_cli.commands.auth.questionary") as mock_q,
-            patch("mdx_cli.commands.auth.verify_totp", return_value=False),
+            patch("mdx_cli.commands.auth.verify_totp", side_effect=[False, True]),
         ):
             mock_q.password.return_value.unsafe_ask.return_value = TOTP_SECRET
-            mock_q.text.return_value.unsafe_ask.return_value = "000000"
+            mock_q.text.return_value.unsafe_ask.side_effect = ["000000", "123456"]
 
             result = runner.invoke(app, ["otp"])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 0, result.output
     assert "一致しません" in result.output
-    store.save_totp_secret.assert_not_called()
+    store.save_totp_secret.assert_called_once_with("saved_user", TOTP_SECRET)
+
+
+def test_auth_otp_escape_on_code_goes_back_to_secret():
+    """確認用のOTPで Esc を押すとシークレットの入力へ戻る"""
+    from mdx_cli.commands._prompt_steps import BACK
+
+    with patch("mdx_cli.commands.auth.get_store") as MockStore:
+        store = MockStore.return_value
+        store.load_credentials.return_value = ("saved_user", "saved_pass")
+        store.load_totp_secret.return_value = None
+        with (
+            patch("mdx_cli.commands.auth.questionary") as mock_q,
+            patch("mdx_cli.commands.auth.verify_totp", return_value=True),
+        ):
+            mock_q.password.return_value.unsafe_ask.side_effect = ["JBSWY3DPEHPK3PXQ", TOTP_SECRET]
+            mock_q.text.return_value.unsafe_ask.side_effect = [BACK, "123456"]
+            result = runner.invoke(app, ["otp"])
+
+    assert result.exit_code == 0, result.output
+    store.save_totp_secret.assert_called_once_with("saved_user", TOTP_SECRET)
 
 
 def test_auth_otp_non_interactive_reads_secret_from_stdin():

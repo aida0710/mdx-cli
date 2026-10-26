@@ -41,7 +41,7 @@ from mdx_cli.commands._deploy_steps import (
     check_pack_num,
     print_deploy_summary,
 )
-from mdx_cli.commands._prompt_steps import confirm_or_edit, run_steps
+from mdx_cli.commands._prompt_steps import Step, ask, confirm_or_edit, run_steps
 from mdx_cli.commands._name_pattern import (
     count_wildcards,
     is_name_pattern,
@@ -228,12 +228,16 @@ def deploy(
     if steps:
         console.print("[dim]Esc で前の項目へ戻れます[/dim]")
     run_steps(steps)
-    check_pack_num(answers)
+
+    def check_and_print_summary() -> None:
+        # 引数のパック数は、「直す」でパックタイプを変えるたびに上限を確かめ直す
+        check_pack_num(answers)
+        print_deploy_summary(answers)
 
     if yes:
-        print_deploy_summary(answers)
+        check_and_print_summary()
     else:
-        confirm_or_edit(steps, print_summary=lambda: print_deploy_summary(answers), message="デプロイしますか？")
+        confirm_or_edit(steps, print_summary=check_and_print_summary, message="デプロイしますか？")
 
     _execute_deploy(client, answers.to_plan(), pid, no_wait=no_wait)
 
@@ -442,8 +446,9 @@ def _build_rename_plan(
     return plan
 
 
-def _ask_rename_plan(vms: list, all_vms: list, target: str) -> list[tuple[object, str]]:
-    """新しい名前を対話で聞き、使える名前になるまでその場で聞き直す。"""
+def _ask_new_name_step(answers: dict, all_vms: list) -> None:
+    """新しい名前を聞き、使える名前になるまでその場で聞き直す。答えと計画を answers へ書く。"""
+    vms, target = answers["vms"], answers["target"]
     wildcard_count = count_wildcards(target)
     if wildcard_count == 0:
         console.print(f"[dim]* は今の名前を表します（例: '*-old' → {vms[0].name}-old）[/dim]")
@@ -460,14 +465,17 @@ def _ask_rename_plan(vms: list, all_vms: list, target: str) -> list[tuple[object
         label = "新しい名前のパターン:"
 
     while True:
-        new_name = questionary.text(label, default="").unsafe_ask().strip()
+        new_name = ask(questionary.text(label, default=answers["new_name"] or "")).strip()
         if not new_name:
             console.print("[yellow]新しい名前を入力してください[/yellow]")
             continue
         try:
-            return _build_rename_plan(vms, all_vms, target=target, new_name=new_name, suffix=None)
+            answers["plan"] = _build_rename_plan(vms, all_vms, target=target, new_name=new_name, suffix=None)
         except ValueError as exc:
             console.print(f"[red]{exc}[/red]")
+            continue
+        answers["new_name"] = new_name
+        return
 
 
 def _parallel_vm_action(vms: list, action_path_fn, action_name: str, json_fn=None) -> list[dict]:
@@ -680,33 +688,50 @@ def rename(
     client = get_client()
     all_vms = list_vms(client, pid)
     stop_active_spinner()
+    answers = {"vms": None, "target": target, "new_name": new_name, "plan": None}
+    steps: list[Step] = []
     if target:
-        vms = _resolve_vms(client, target, pid)
+        answers["vms"] = _resolve_vms(client, target, pid)
         if is_uuid(target):
-            target = vms[0].name  # * が今の名前を表すように、名前で指定したのと同じに扱う
+            answers["target"] = answers["vms"][0].name  # * が今の名前を表すように、名前で指定したのと同じに扱う
     else:
         if not all_vms:
             fail("VMがありません")
-        selected = select_from_list(
-            all_vms, lambda v: f"{v.name} [{v.status}]", title="VM一覧:"
-        )
-        vms = [selected]
-        target = selected.name
 
-    if new_name is None and suffix is None:
-        plan = _ask_rename_plan(vms, all_vms, target)
+        def ask_vm() -> None:
+            previous = answers["vms"][0] if answers["vms"] else None
+            selected = select_from_list(
+                all_vms, lambda v: f"{v.name} [{v.status}]", title="VM一覧:",
+                default=all_vms.index(previous) + 1 if previous in all_vms else None,
+            )
+            answers["vms"], answers["target"] = [selected], selected.name
+
+        steps.append(Step("VM", ask_vm))
+
+    name_from_arguments = new_name is not None or suffix is not None
+    if not name_from_arguments:
+        steps.append(Step("新しい名前", lambda: _ask_new_name_step(answers, all_vms)))
+    run_steps(steps)
+
+    def print_plan() -> None:
+        if name_from_arguments:
+            # 「直す」でVMを選び直したときも、引数の名前で計画を作り直す
+            try:
+                answers["plan"] = _build_rename_plan(
+                    answers["vms"], all_vms, target=answers["target"], new_name=new_name, suffix=suffix
+                )
+            except ValueError as exc:
+                fail(str(exc))
+        console.print(f"\n[bold]{len(answers['plan'])}台のVM名を変更します:[/bold]")
+        for vm, planned_name in answers["plan"]:
+            console.print(f"  {vm.name} → {planned_name} [dim]({vm.uuid})[/dim]")
+
+    if yes:
+        print_plan()
     else:
-        try:
-            plan = _build_rename_plan(vms, all_vms, target=target, new_name=new_name, suffix=suffix)
-        except ValueError as exc:
-            fail(str(exc))
-
-    console.print(f"\n[bold]{len(plan)}台のVM名を変更します:[/bold]")
-    for vm, planned_name in plan:
-        console.print(f"  {vm.name} → {planned_name} [dim]({vm.uuid})[/dim]")
-
-    if not yes and not questionary.confirm(f"\n{len(plan)}台のVM名を変更しますか？").unsafe_ask():
-        raise typer.Abort()
+        confirm_or_edit(steps, print_summary=print_plan, message="VM名を変更しますか？")
+    plan = answers["plan"]
+    vms = [vm for vm, _ in plan]
 
     task_ids: list[str] = []
     failed = False
@@ -760,44 +785,17 @@ def rename(
         raise typer.Exit(code=1)
 
 
-@app.command()
-def reconfigure(
-    target: str = typer.Argument(None, help="VM名またはUUID（省略時は一覧から選択）"),
-    project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
-    no_wait: bool = typer.Option(False, "--no-wait", help="タスク完了を待たない"),
-) -> None:
-    """VM構成変更（対話式。パック数・ディスクサイズを変更。パターンで複数台対応）"""
-    pid = resolve_project_id(project_id)
-    client = get_client()
-
-    # VM選択
-    if not target:
-        all_vms = list_vms(client, pid)
-        stop_active_spinner()
-        if not all_vms:
-            fail("VMがありません")
-        selected = select_from_list(
-            all_vms, lambda v: f"{v.name} [{v.status}]", title="VM一覧:"
-        )
-        vms_brief = [selected]
-    else:
-        vms_brief = _resolve_vms(client, target, project_id)
-
-    # 全VMの詳細を取得
+def _load_reconfigure_targets(client, vms_brief: list) -> list:
+    """構成変更するVMの詳細を取り、複数台なら構成が揃っているか確かめて、今の構成を表示する。"""
     vms_detail = _fetch_vm_details(client, vms_brief)
     stop_active_spinner()
-
     if not vms_detail:
         fail("構成変更可能なVMがありません（詳細取得が全て失敗しました）")
-
-    # 複数台なら均質性チェック
     if len(vms_detail) > 1:
         _check_reconfigure_homogeneity(vms_detail)
 
-    # 代表VMの現在構成を表示
     ref = vms_detail[0]
     ref_extra = getattr(ref, "model_extra", {}) or {}
-
     if len(vms_detail) > 1:
         console.print(f"\n[bold]対象VM ({len(vms_detail)}台):[/bold]")
         for v in vms_detail:
@@ -805,68 +803,108 @@ def reconfigure(
         console.print(f"\n[bold]現在の構成（{ref.name} を代表として表示）:[/bold]")
     else:
         console.print(f"\n[bold]{ref.name}[/bold] の現在の構成:")
-
     console.print(f"  状態:     {ref.status}")
     console.print(f"  パック:   {ref.pack_type or 'cpu'} x {ref.pack_num if ref.pack_num is not None else '?'}")
     console.print(f"  CPU:      {ref_extra.get('cpu', '?')}")
     console.print(f"  メモリ:   {ref_extra.get('memory', '?')}")
-    ref_disks = ref.hard_disks
-    for d in ref_disks:
+    for d in ref.hard_disks:
         console.print(f"  ディスク: #{d.get('disk_number', '?')}: {d.get('capacity', '?')}")
+    console.print("\n[bold]新しい構成（Enterで変更なし、Esc で前の項目へ戻る）:[/bold]")
+    return vms_detail
 
-    # 稼働中VMの停止
+
+# パック数が取れなかったVMの初期値（CPUパックの対話入力の既定値と同じ）
+_UNKNOWN_PACK_NUM_DEFAULT = PACK_SPECS["cpu"].default_num
+# 容量が読めなかったディスクの初期値（GB）
+_UNKNOWN_DISK_CAPACITY_GB = 40
+
+
+def _ask_reconfigure_pack_num(answers: dict) -> None:
+    ref = answers["vms_detail"][0]
+    pack_type = ref.pack_type or "cpu"
+    spec = PACK_SPECS.get(pack_type, PACK_SPECS["cpu"])
+    current = ref.pack_num if ref.pack_num is not None else _UNKNOWN_PACK_NUM_DEFAULT
+    answers["pack_num"] = prompt_int(
+        f"パック数 ({pack_type}, 最大{spec.max_num}):",
+        max_val=spec.max_num,
+        default=str(answers["pack_num"] or current),
+    )
+    console.print(f"  → [cyan]{spec.resource_summary(answers['pack_num'])}[/cyan]")
+
+
+def _ask_reconfigure_capacities(answers: dict) -> None:
+    """代表VMの各ディスクの新しい容量を聞く（全VMに同じ値を適用する）。"""
+    disks = answers["vms_detail"][0].hard_disks
+    previous = answers["capacities"] or [_capacity_gb(d) or _UNKNOWN_DISK_CAPACITY_GB for d in disks]
+    answers["capacities"] = [
+        prompt_int(f"ディスク #{d.get('disk_number', '?')} (GB):", default=str(capacity))
+        for d, capacity in zip(disks, previous)
+    ]
+
+
+def _print_reconfigure_summary(answers: dict) -> None:
+    vms_detail = answers["vms_detail"]
+    ref = vms_detail[0]
+    current_pack_num = ref.pack_num if ref.pack_num is not None else "?"
+    console.print("\n[bold]変更内容:[/bold]")
+    console.print(f"  パック: {ref.pack_type or 'cpu'} x {current_pack_num} → {answers['pack_num']}")
+    for d_old, new_cap in zip(ref.hard_disks, answers["capacities"]):
+        console.print(f"  ディスク #{d_old.get('disk_number', '?')}: {d_old.get('capacity', '?')} → {new_cap} GB")
+    if len(vms_detail) > 1:
+        console.print(f"  対象:   {len(vms_detail)}台")
+    running = [v for v in vms_detail if v.status == "PowerON"]
+    if running:
+        console.print(f"[yellow]  稼働中の{len(running)}台は、実行するとシャットダウンしてから構成変更します[/yellow]")
+
+
+@app.command()
+def reconfigure(
+    target: str = typer.Argument(None, help="VM名またはUUID（省略時は一覧から選択）"),
+    project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
+    no_wait: bool = typer.Option(False, "--no-wait", help="タスク完了を待たない"),
+) -> None:
+    """VM構成変更（対話式。パック数・ディスクサイズを変更。パターンで複数台対応。Esc で前の項目へ戻る）"""
+    pid = resolve_project_id(project_id)
+    client = get_client()
+
+    answers = {"vms_detail": None, "pack_num": None, "capacities": None}
+    steps: list[Step] = []
+    if target:
+        answers["vms_detail"] = _load_reconfigure_targets(client, _resolve_vms(client, target, project_id))
+    else:
+        all_vms = list_vms(client, pid)
+        stop_active_spinner()
+        if not all_vms:
+            fail("VMがありません")
+
+        def ask_vm() -> None:
+            previous = answers["vms_detail"][0].uuid if answers["vms_detail"] else None
+            uuids = [v.uuid for v in all_vms]
+            selected = select_from_list(
+                all_vms, lambda v: f"{v.name} [{v.status}]", title="VM一覧:",
+                default=uuids.index(previous) + 1 if previous in uuids else None,
+            )
+            answers["vms_detail"] = _load_reconfigure_targets(client, [selected])
+            answers["pack_num"] = answers["capacities"] = None  # 別のVMなら今の構成から聞き直す
+
+        steps.append(Step("VM", ask_vm))
+
+    steps.append(Step("パック数", lambda: _ask_reconfigure_pack_num(answers)))
+    steps.append(Step("ディスク", lambda: _ask_reconfigure_capacities(answers)))
+    run_steps(steps)
+
+    confirm_or_edit(
+        steps, print_summary=lambda: _print_reconfigure_summary(answers), message="構成変更を実行しますか？"
+    )
+    vms_detail, new_pack_num, new_capacities = answers["vms_detail"], answers["pack_num"], answers["capacities"]
+
+    # 稼働中VMは確認のあとで停止する（入力の途中では止めない）
     running_vms = [v for v in vms_detail if v.status == "PowerON"]
     if running_vms:
-        console.print(
-            f"\n[yellow]構成変更にはVMの停止が必要です（稼働中: {len(running_vms)}台）。[/yellow]"
-        )
-        if not questionary.confirm("停止して構成変更しますか？").unsafe_ask():
-            raise typer.Abort()
         _parallel_vm_action(
             running_vms, lambda v: vm_action_path(v.uuid, "shutdown"), "シャットダウン中"
         )
         _ensure_stopped(running_vms)
-
-    # 新しい構成を入力
-    console.print("\n[bold]新しい構成（Enterで変更なし）:[/bold]")
-
-    pack_type = ref.pack_type or "cpu"
-    current_pack_num = ref.pack_num if ref.pack_num is not None else 3
-    spec = PACK_SPECS.get(pack_type, PACK_SPECS["cpu"])
-
-    new_pack_num = prompt_int(
-        f"パック数 ({pack_type}, 最大{spec.max_num}):",
-        max_val=spec.max_num,
-        default=str(current_pack_num),
-    )
-
-    console.print(f"  → [cyan]{spec.resource_summary(new_pack_num)}[/cyan]")
-
-    # ディスク新容量（代表VMの各ディスク分を聞き、全VMに同一適用）
-    new_capacities: list[int] = []
-    for d in ref_disks:
-        current_cap_int = _capacity_gb(d) or 40
-        new_cap = prompt_int(
-            f"ディスク #{d.get('disk_number', '?')} (GB):",
-            default=str(current_cap_int),
-        )
-        new_capacities.append(new_cap)
-
-    # 確認
-    console.print("\n[bold]変更内容:[/bold]")
-    console.print(
-        f"  パック: {pack_type} x {current_pack_num} → {new_pack_num}"
-    )
-    for d_old, new_cap in zip(ref_disks, new_capacities):
-        old_cap = d_old.get("capacity", "?")
-        console.print(
-            f"  ディスク #{d_old.get('disk_number', '?')}: {old_cap} → {new_cap} GB"
-        )
-    if len(vms_detail) > 1:
-        console.print(f"  対象:   {len(vms_detail)}台")
-
-    if not questionary.confirm("\n構成変更を実行しますか？").unsafe_ask():
-        raise typer.Abort()
 
     # VMごとに個別の config を構築（device_key と segment は各VMの現状を保持）
     segments = list_segments(client, pid)
