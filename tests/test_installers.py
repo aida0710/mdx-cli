@@ -305,14 +305,24 @@ def test_install_sh_shows_startup_error_and_stops_when_new_bundle_cannot_start(t
     assert not (Path(env['MDX_INSTALL_DIR']) / 'mdx').exists()
 
 
-@pytest.mark.skipif(not os.environ.get('MDX_TEST_BUNDLE_ARCHIVE'), reason='Release bundle not provided')
-def test_install_sh_real_release_bundle(tmp_path):
-    """Run the real release bundle through install, replacement and relocation."""
+requires_real_release_bundle = pytest.mark.skipif(
+    not os.environ.get('MDX_TEST_BUNDLE_ARCHIVE'), reason='Release bundle not provided'
+)
+
+
+def _real_release_bundle_env(tmp_path: Path) -> dict[str, str]:
     env, fake_bin = _base_env(tmp_path)
     _archive_downloads(tmp_path, env, fake_bin)
     real_archive = Path(os.environ['MDX_TEST_BUNDLE_ARCHIVE'])
     shutil.copyfile(real_archive, env['FAKE_ARCHIVE'])
     env['FAKE_ARCHIVE_HASH'] = hashlib.sha256(real_archive.read_bytes()).hexdigest()
+    return env
+
+
+@requires_real_release_bundle
+def test_install_sh_real_release_bundle(tmp_path):
+    """Run the real release bundle through install, replacement and relocation."""
+    env = _real_release_bundle_env(tmp_path)
     for _ in range(2):
         result = _run_install_sh(env)
         assert result.returncode == 0, result.stdout + result.stderr
@@ -320,3 +330,20 @@ def test_install_sh_real_release_bundle(tmp_path):
         from mdx_cli import __version__
         assert subprocess.check_output([str(target), '--version'], text=True).strip() == __version__
         subprocess.run([str(target), '--help'], check=True, capture_output=True)
+
+
+@requires_real_release_bundle
+def test_real_release_bundle_prints_bash_completion_script(tmp_path):
+    """v2.3.1 までのバンドルは shellingham.posix を含まず、補完の導入時にシェルを判定できず落ちていた。"""
+    env = _real_release_bundle_env(tmp_path)
+    result = _run_install_sh(env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    target = Path(env['MDX_INSTALL_DIR']) / 'mdx'
+    # 末尾の true は bash が mdx を exec で置き換えず、mdx の親プロセスとして残るようにするため。
+    completion = subprocess.run(
+        ['bash', '-c', '"$0" --show-completion; true', str(target)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert '_MDX_COMPLETE=complete_bash' in completion.stdout, completion.stdout + completion.stderr
