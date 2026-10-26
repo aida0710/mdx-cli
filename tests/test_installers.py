@@ -5,6 +5,7 @@ import hashlib
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -340,8 +341,12 @@ def test_real_release_bundle_prints_bash_completion_script(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     target = Path(env['MDX_INSTALL_DIR']) / 'mdx'
     # 末尾の true は bash が mdx を exec で置き換えず、mdx の親プロセスとして残るようにするため。
+    command = ['bash', '-c', '"$0" --show-completion; true', str(target)]
+    if sys.platform == 'darwin':
+        # macOS の ps は端末を持つプロセスしか出さないため、端末の無い CI ではシェルを判定できない。
+        command = ['script', '-q', '/dev/null', *command]
     completion = subprocess.run(
-        ['bash', '-c', '"$0" --show-completion; true', str(target)],
+        command,
         capture_output=True,
         text=True,
         check=True,
