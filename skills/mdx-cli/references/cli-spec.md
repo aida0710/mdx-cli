@@ -143,7 +143,7 @@ with ordering were also exercised successfully.
 | Command | Arguments/options | Purpose |
 |---|---|---|
 | `mdx vm list [-p ID] [--json]` | project optional | List VMs. |
-| `mdx vm show [target] [-p ID] [--json]` | target is UUID or exact VM name; omitted means interactive list | Show VM detail including OS, resources, disks, service networks, storage networks, and VMware Tools. |
+| `mdx vm show [target] [-p ID] [--json]` | target is UUID, VM name, or pattern; omitted means interactive list | Show VM detail including OS, resources, disks, service networks, storage networks, and VMware Tools. A pattern shows every matched VM; `--json` then prints an array. |
 | `mdx vm sync [-p ID]` | project optional | Request VM information sync. |
 | `mdx vm csv [target] [-p ID] [-o PATH]` | target pattern optional | Export Web portal-compatible CSV. Without `-o`, writes stdout. |
 
@@ -218,6 +218,7 @@ All target arguments accept UUID, exact name, or name pattern.
 | `mdx vm reboot <target> [-p ID]` | none | Reboot. Confirms only when multiple VMs match. |
 | `mdx vm reset <target> [-p ID]` | none | Hard reset. Always asks a high-risk confirmation. |
 | `mdx vm destroy <target> [-p ID] [--no-wait]` | none | Deletes VMs. If any are `PowerON`, force-stops them, waits for power-off, then destroys. Always asks a high-risk confirmation. |
+| `mdx vm rename [target] [new-name] [--suffix TEXT] [-p ID] [--no-wait]` | target omitted means interactive list; new name omitted means prompt | Renames VMs. `*` in the new name receives the part matched by `*` in the target pattern (`rename 'old-*' 'new-*'`); `--suffix` appends to current names. Multiple VMs ask for confirmation. |
 
 Bulk lifecycle operations run in chunks of 30 and refresh the token before each chunk. Parallel action progress is displayed.
 
