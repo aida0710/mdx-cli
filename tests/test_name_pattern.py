@@ -1,7 +1,11 @@
+import pytest
+
 from mdx_cli.commands._name_pattern import (
     expand_name_pattern,
     expand_name_pattern_for_deploy,
+    is_name_pattern,
     match_names,
+    rename_by_wildcards,
 )
 
 
@@ -138,3 +142,33 @@ def test_deploy_alpha_with_zero_padded():
     assert len(result) == 20
     assert result[0] == "vm-a-00"
     assert result[-1] == "vm-b-09"
+
+
+# --- rename_by_wildcards ---
+
+
+def test_rename_by_wildcards_carries_matched_part_to_new_name():
+    """対象パターンの * に当たった部分を、新しい名前の * に入れる"""
+    assert rename_by_wildcards("crawler-*", "crawler-01", "yt-*") == "yt-01"
+    assert rename_by_wildcards("*-old", "worker-3-old", "*") == "worker-3"
+    assert rename_by_wildcards("a-*-b-*", "a-x-b-y", "*_*") == "x_y"
+
+
+def test_rename_by_wildcards_rejects_mismatched_wildcard_count():
+    """新しい名前の * の数が対象パターンと違えば、どこに何を入れるか決まらないので断る"""
+    with pytest.raises(ValueError, match=r"\* の数"):
+        rename_by_wildcards("crawler-*", "crawler-01", "yt-*-*")
+
+
+def test_rename_by_wildcards_requires_star_pattern_for_target():
+    """対象が * のパターンでなければ、* の置き換えはできない"""
+    with pytest.raises(ValueError, match=r"\* の数"):
+        rename_by_wildcards("crawler-01", "crawler-01", "yt-*")
+
+
+def test_is_name_pattern():
+    """*・?・{範囲} を含むものをパターンとみなす"""
+    assert is_name_pattern("crawler-*")
+    assert is_name_pattern("node-?")
+    assert is_name_pattern("node-{0-3}")
+    assert not is_name_pattern("crawler-01")

@@ -5,6 +5,7 @@
 ```bash
 mdx vm list                    # VM一覧
 mdx vm show my-vm-01           # 名前で詳細表示
+mdx vm show "crawler-*"        # パターンに一致するVMをまとめて詳細表示
 mdx vm show                    # 一覧から番号選択
 mdx vm list --json             # JSON出力
 mdx vm list --json | jq '.[] | select(.status == "PowerON") | .name'
@@ -127,11 +128,14 @@ mdx vm stop "worker-{a-c}-*"
 ### 名前を変更する
 
 ```bash
+mdx vm rename                           # 一覧から選び、新しい名前を入力
 mdx vm rename my-vm-01 new-vm-01
-mdx vm rename "worker-*" --suffix=-old
+mdx vm rename "crawler-*" "yt-*"        # crawler-01 → yt-01 のように * の部分を引き継ぐ
+mdx vm rename "crawler-*"               # 対象を表示し、新しい名前のパターンを入力
+mdx vm rename "worker-*" --suffix=-old  # 現在名の末尾に追加
 ```
 
-単一VMは新しい名前を指定します。一括変更は `--suffix` で現在名に文字列を追加します。
+新しい名前の `*` には、対象パターンの `*` に当たった部分が入ります。`*` の数は対象パターンと揃えます。複数台の変更は実行前に確認します。
 
 ### 構成変更（対話式、パターン対応）
 

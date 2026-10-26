@@ -40,6 +40,31 @@ def test_vm_show_json():
             assert data["name"] == "test-vm"
 
 
+def test_vm_show_pattern_shows_every_matched_vm():
+    """show に * のパターンを渡すと、当たったVMをすべて表示する"""
+    vms = [_make_vm("crawler-01", "uuid-0"), _make_vm("crawler-02", "uuid-1")]
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms) as mock_resolve:
+        with patch("mdx_cli.commands.vm._fetch_vm_details", return_value=vms):
+            with patch("mdx_cli.commands.vm.get_client"):
+                result = runner.invoke(app, ["show", "crawler-*"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_resolve.call_args.args[1] == "crawler-*"
+    assert "crawler-01" in result.output
+    assert "crawler-02" in result.output
+
+
+def test_vm_show_pattern_json_is_list():
+    vms = [_make_vm("crawler-01", "uuid-0"), _make_vm("crawler-02", "uuid-1")]
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm._fetch_vm_details", return_value=vms):
+            with patch("mdx_cli.commands.vm.get_client"):
+                result = runner.invoke(app, ["show", "crawler-*", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert [vm["name"] for vm in json.loads(result.output)] == ["crawler-01", "crawler-02"]
+
+
 def test_vm_stop_by_uuid():
     """UUID指定で1台停止"""
     vm = _make_vm()
@@ -160,7 +185,75 @@ def test_vm_rename_rejects_bulk_new_name():
                     )
 
     assert result.exit_code == 1
-    assert "複数VMの名前変更には --suffix" in result.output
+    assert "新しい名前に * を入れる" in result.output
+
+
+def test_vm_rename_pattern_to_pattern_carries_matched_part():
+    """rename 'crawler-*' 'yt-*' で * に当たった部分を引き継いで一括変更する"""
+    vms = [
+        _make_vm("crawler-01", "uuid-0", status="PowerOFF"),
+        _make_vm("crawler-02", "uuid-1", status="PowerOFF"),
+    ]
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm.list_vms", return_value=vms):
+            with patch(
+                "mdx_cli.commands.vm._parallel_vm_action",
+                return_value=[{"task_id": "task-0"}, {"task_id": "task-1"}],
+            ) as mock_action:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                            mock_q.confirm.return_value.unsafe_ask.return_value = True
+                            result = runner.invoke(
+                                app, ["rename", "crawler-*", "yt-*", "--no-wait"]
+                            )
+
+    assert result.exit_code == 0, result.output
+    assert "crawler-01 → yt-01" in result.output
+    json_fn = mock_action.call_args.kwargs["json_fn"]
+    assert [json_fn(vm) for vm in vms] == [{"vm_name": "yt-01"}, {"vm_name": "yt-02"}]
+
+
+def test_vm_rename_without_arguments_selects_vm_and_asks_new_name():
+    """引数なしなら一覧から選び、現在名を初期値に新しい名前を聞く"""
+    vm = _make_vm("worker-0", "uuid-0", status="PowerOFF")
+    with patch("mdx_cli.commands.vm.list_vms", return_value=[vm]):
+        with patch("mdx_cli.commands.vm.select_from_list", return_value=vm):
+            with patch("mdx_cli.commands.vm.rename_vm", return_value="task-rename") as mock_rename:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                            mock_q.text.return_value.unsafe_ask.return_value = "worker-new"
+                            result = runner.invoke(app, ["rename", "--no-wait"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_q.text.call_args.kwargs["default"] == "worker-0"
+    assert mock_rename.call_args.args[1:] == ("uuid-0", "worker-new")
+
+
+def test_vm_rename_pattern_without_new_name_asks_new_pattern():
+    """パターンだけ渡されたら、対象を見せてから新しい名前のパターンを聞く"""
+    vms = [
+        _make_vm("crawler-01", "uuid-0", status="PowerOFF"),
+        _make_vm("crawler-02", "uuid-1", status="PowerOFF"),
+    ]
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm.list_vms", return_value=vms):
+            with patch(
+                "mdx_cli.commands.vm._parallel_vm_action",
+                return_value=[{"task_id": "task-0"}, {"task_id": "task-1"}],
+            ) as mock_action:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                            mock_q.text.return_value.unsafe_ask.return_value = "yt-*"
+                            mock_q.confirm.return_value.unsafe_ask.return_value = True
+                            result = runner.invoke(app, ["rename", "crawler-*", "--no-wait"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_q.text.call_args.kwargs["default"] == "crawler-*"
+    json_fn = mock_action.call_args.kwargs["json_fn"]
+    assert [json_fn(vm) for vm in vms] == [{"vm_name": "yt-01"}, {"vm_name": "yt-02"}]
 
 
 def test_vm_rename_rejects_existing_name_collision():

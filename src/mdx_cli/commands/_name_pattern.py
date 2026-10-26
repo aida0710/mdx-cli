@@ -132,3 +132,30 @@ def match_names(pattern: str, names: list[str]) -> list[str]:
 
     # 完全一致
     return [n for n in names if n == pattern]
+
+
+def is_name_pattern(text: str) -> bool:
+    """match_names() がパターンとして扱う記号（*・?・{範囲}）を含むか。"""
+    return "*" in text or "?" in text or ("{" in text and "}" in text)
+
+
+def rename_by_wildcards(target_pattern: str, name: str, new_pattern: str) -> str:
+    """target_pattern の * に当たった name の部分を、new_pattern の * へ順に入れる。
+
+    例: ("crawler-*", "crawler-01", "yt-*") → "yt-01"
+    """
+    star_count = target_pattern.count("*")
+    if star_count == 0 or new_pattern.count("*") != star_count:
+        raise ValueError(
+            f"新しい名前の * の数（{new_pattern.count('*')}）を、"
+            f"対象パターン '{target_pattern}' の * の数（{star_count}）と揃えてください"
+        )
+    # fnmatch と同じく * は任意の文字列。複数の * は左から短く取る
+    regex = "(.*?)".join(re.escape(part) for part in target_pattern.split("*"))
+    matched = re.fullmatch(regex, name)
+    if matched is None:
+        raise ValueError(f"{name} は '{target_pattern}' に一致しません")
+    parts = new_pattern.split("*")
+    return parts[0] + "".join(
+        captured + rest for captured, rest in zip(matched.groups(), parts[1:])
+    )

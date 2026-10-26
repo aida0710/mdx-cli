@@ -38,7 +38,9 @@ from mdx_cli.commands._deploy_plan import DeployPlan
 from mdx_cli.commands._name_pattern import (
     expand_name_pattern,
     expand_name_pattern_for_deploy,
+    is_name_pattern,
     match_names,
+    rename_by_wildcards,
 )
 from mdx_cli.console import console
 from mdx_cli.models.pack import PACK_SPECS, pack_choice_label
@@ -101,20 +103,33 @@ def _resolve_vm_uuid(
 
 @app.command()
 def show(
-    target: str = typer.Argument(None, help="VM ID または名前（省略時は一覧から選択）"),
+    target: str = typer.Argument(
+        None, help="VM ID、名前、またはパターン (例: 'crawler-*' ※シェルでクォート必須、省略時は一覧から選択)"
+    ),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
-    json: bool = typer.Option(False, "--json", help="JSON出力"),
+    json: bool = typer.Option(False, "--json", help="JSON出力（パターン指定時は配列）"),
 ) -> None:
-    """VM詳細"""
+    """VM詳細（パターンで複数台対応）"""
     client = get_client(silent=json)
+    if target and is_name_pattern(target):
+        vms = _fetch_vm_details(client, _resolve_vms(client, target, project_id))
+        stop_active_spinner()
+        if json:
+            render_json(vms)
+            return
+        for vm in vms:
+            _print_vm_detail(vm)
+        return
+
     vm = get_vm(client, _resolve_vm_uuid(client, target, project_id))
     stop_active_spinner()
-
     if json:
         render_json(vm)
         return
+    _print_vm_detail(vm)
 
-    # Rich表示
+
+def _print_vm_detail(vm) -> None:
     extra = getattr(vm, "model_extra", {}) or {}
     console.print(f"\n[bold]{vm.name}[/bold]")
     console.print(f"  UUID:           {vm.uuid}")
@@ -548,21 +563,30 @@ def _build_rename_plan(
     vms: list,
     all_vms: list,
     *,
+    target: str,
     new_name: str | None,
     suffix: str | None,
 ) -> list[tuple[object, str]]:
-    """名前変更計画を作り、空名・重複・既存VMとの衝突を検証する。"""
+    """名前変更計画を作り、空名・重複・既存VMとの衝突を検証する。
+
+    new_name に * があれば、target の * に当たった部分を引き継ぐ（'old-*' → 'new-*'）。
+    """
     if (new_name is None) == (suffix is None):
         raise ValueError("新しいVM名または --suffix のどちらか一方を指定してください")
-    if new_name is not None and len(vms) != 1:
-        raise ValueError("複数VMの名前変更には --suffix を使用してください")
 
-    if new_name is not None:
-        plan = [(vms[0], new_name.strip())]
-    else:
+    if suffix is not None:
         if not suffix:
             raise ValueError("--suffix に空文字は指定できません")
         plan = [(vm, f"{vm.name}{suffix}") for vm in vms]
+    elif "*" in new_name:
+        plan = [(vm, rename_by_wildcards(target, vm.name, new_name.strip())) for vm in vms]
+    elif len(vms) != 1:
+        raise ValueError(
+            "複数VMの名前変更には、新しい名前に * を入れるか --suffix を使ってください"
+            "（例: rename 'old-*' 'new-*'）"
+        )
+    else:
+        plan = [(vms[0], new_name.strip())]
 
     target_names = {vm.name for vm in vms}
     reserved_names = {vm.name for vm in all_vms} - target_names
@@ -578,6 +602,18 @@ def _build_rename_plan(
         if planned_name in reserved_names:
             raise ValueError(f"変更後のVM名が既存VMと衝突します: {planned_name}")
     return plan
+
+
+def _ask_new_name(vms: list, target: str) -> str:
+    """新しいVM名を対話で聞く。複数台なら * を使ったパターンを聞く。"""
+    if len(vms) == 1:
+        return questionary.text("新しいVM名:", default=vms[0].name).unsafe_ask()
+
+    console.print(f"\n[bold]対象のVM（{len(vms)}台）:[/bold]")
+    for vm in vms:
+        console.print(f"  {vm.name} [dim]({vm.uuid})[/dim]")
+    console.print(f"[dim]* には '{target}' の * に当たった部分が入ります（例: 'new-*'）[/dim]")
+    return questionary.text("新しい名前のパターン:", default=target).unsafe_ask()
 
 
 def _parallel_vm_action(vms: list, action_path_fn, action_name: str, json_fn=None) -> list[dict]:
@@ -760,9 +796,13 @@ def reset(
 @app.command()
 def rename(
     target: str = typer.Argument(
-        help="VM ID、名前、またはパターン (例: 'worker-*' ※シェルでクォート必須)"
+        None,
+        help="VM ID、名前、またはパターン (例: 'worker-*' ※シェルでクォート必須、省略時は一覧から選択)",
     ),
-    new_name: str = typer.Argument(None, help="新しいVM名（単一VMの場合）"),
+    new_name: str = typer.Argument(
+        None,
+        help="新しいVM名。* を入れると対象パターンの * に当たった部分が入る (例: 'new-*')。省略時は対話で入力",
+    ),
     suffix: str = typer.Option(
         None,
         "--suffix",
@@ -777,17 +817,30 @@ def rename(
     ),
     no_wait: bool = typer.Option(False, "--no-wait", help="タスク完了を待たない"),
 ) -> None:
-    """VM名変更（単一名指定、または --suffix によるパターン一括変更）"""
+    """VM名変更（rename 'old-*' 'new-*' や --suffix でパターン一括変更、引数省略で対話）"""
     pid = resolve_project_id(project_id)
     client = get_client()
-    vms = _resolve_vms(client, target, pid)
     all_vms = list_vms(client, pid)
     stop_active_spinner()
+    if target:
+        vms = _resolve_vms(client, target, pid)
+    else:
+        if not all_vms:
+            fail("VMがありません")
+        selected = select_from_list(
+            all_vms, lambda v: f"{v.name} [{v.status}]", title="VM一覧:"
+        )
+        vms = [selected]
+        target = selected.name
+
+    if new_name is None and suffix is None:
+        new_name = _ask_new_name(vms, target)
 
     try:
         plan = _build_rename_plan(
             vms,
             all_vms,
+            target=target,
             new_name=new_name,
             suffix=suffix,
         )
