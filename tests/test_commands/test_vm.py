@@ -120,13 +120,75 @@ def test_vm_rename_single():
                             "mdx_cli.commands.vm.resolve_project_id",
                             return_value="proj-1",
                         ):
+                            with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                                mock_q.confirm.return_value.unsafe_ask.return_value = True
+                                result = runner.invoke(
+                                    app,
+                                    ["rename", vm.uuid, "worker-0-vpn", "-p", "proj-1"],
+                                )
+
+    assert result.exit_code == 0, result.output
+    assert "worker-0 → worker-0-vpn" in result.output
+    mock_q.confirm.assert_called_once()
+    mock_rename.assert_called_once_with(mock_rename.call_args.args[0], vm.uuid, "worker-0-vpn")
+
+
+def test_vm_rename_single_yes_skips_confirmation_and_star_means_current_name():
+    """-y なら確認しない。名前1つの対象では * が今の名前全体を表す"""
+    vm = _make_vm("worker-0", "uuid-0", status="PowerOFF")
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=[vm]):
+        with patch("mdx_cli.commands.vm.list_vms", return_value=[vm]):
+            with patch("mdx_cli.commands.vm.rename_vm", return_value="task-rename") as mock_rename:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands.vm.questionary") as mock_q:
                             result = runner.invoke(
-                                app,
-                                ["rename", vm.uuid, "worker-0-vpn", "-p", "proj-1"],
+                                app, ["rename", "worker-0", "*-old", "-y", "--no-wait"]
                             )
 
     assert result.exit_code == 0, result.output
-    mock_rename.assert_called_once_with(mock_rename.call_args.args[0], vm.uuid, "worker-0-vpn")
+    mock_q.confirm.assert_not_called()
+    assert mock_rename.call_args.args[1:] == ("uuid-0", "worker-0-old")
+
+
+def test_vm_rename_uuid_target_star_means_current_name():
+    """UUID で指定しても、* は今の名前全体を表す"""
+    vm = _make_vm("worker-0", "00000000-0000-0000-0000-0000000000aa", status="PowerOFF")
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=[vm]):
+        with patch("mdx_cli.commands.vm.list_vms", return_value=[vm]):
+            with patch("mdx_cli.commands.vm.rename_vm", return_value="task-rename") as mock_rename:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        result = runner.invoke(app, ["rename", vm.uuid, "*-old", "-y", "--no-wait"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_rename.call_args.args[2] == "worker-0-old"
+
+
+def test_vm_rename_interactive_reasks_after_invalid_name():
+    """対話で入力した名前が使えなければ、理由を出してその場で聞き直す"""
+    vms = [
+        _make_vm("crawler-01", "uuid-0", status="PowerOFF"),
+        _make_vm("crawler-02", "uuid-1", status="PowerOFF"),
+    ]
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm.list_vms", return_value=vms):
+            with patch(
+                "mdx_cli.commands.vm._parallel_vm_action",
+                return_value=[{"task_id": "task-0"}, {"task_id": "task-1"}],
+            ) as mock_action:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                            mock_q.text.return_value.unsafe_ask.side_effect = ["", "yt", "yt-*"]
+                            mock_q.confirm.return_value.unsafe_ask.return_value = True
+                            result = runner.invoke(app, ["rename", "crawler-*", "--no-wait"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_q.text.call_count == 3
+    assert "新しい名前に * を入れる" in result.output
+    json_fn = mock_action.call_args.kwargs["json_fn"]
+    assert [json_fn(vm) for vm in vms] == [{"vm_name": "yt-01"}, {"vm_name": "yt-02"}]
 
 
 def test_vm_rename_pattern_with_suffix():
@@ -224,10 +286,11 @@ def test_vm_rename_without_arguments_selects_vm_and_asks_new_name():
                     with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
                         with patch("mdx_cli.commands.vm.questionary") as mock_q:
                             mock_q.text.return_value.unsafe_ask.return_value = "worker-new"
+                            mock_q.confirm.return_value.unsafe_ask.return_value = True
                             result = runner.invoke(app, ["rename", "--no-wait"])
 
     assert result.exit_code == 0, result.output
-    assert mock_q.text.call_args.kwargs["default"] == "worker-0"
+    assert mock_q.text.call_args.kwargs["default"] == ""
     assert mock_rename.call_args.args[1:] == ("uuid-0", "worker-new")
 
 
@@ -251,7 +314,7 @@ def test_vm_rename_pattern_without_new_name_asks_new_pattern():
                             result = runner.invoke(app, ["rename", "crawler-*", "--no-wait"])
 
     assert result.exit_code == 0, result.output
-    assert mock_q.text.call_args.kwargs["default"] == "crawler-*"
+    assert mock_q.text.call_args.kwargs["default"] == ""
     json_fn = mock_action.call_args.kwargs["json_fn"]
     assert [json_fn(vm) for vm in vms] == [{"vm_name": "yt-01"}, {"vm_name": "yt-02"}]
 

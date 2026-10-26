@@ -154,16 +154,26 @@ def test_rename_by_wildcards_carries_matched_part_to_new_name():
     assert rename_by_wildcards("a-*-b-*", "a-x-b-y", "*_*") == "x_y"
 
 
-def test_rename_by_wildcards_rejects_mismatched_wildcard_count():
-    """新しい名前の * の数が対象パターンと違えば、どこに何を入れるか決まらないので断る"""
-    with pytest.raises(ValueError, match=r"\* の数"):
-        rename_by_wildcards("crawler-*", "crawler-01", "yt-*-*")
+def test_rename_by_wildcards_carries_range_and_question_mark():
+    """{範囲} と ? に当たった部分も、* と同じく左から順に新しい名前の * へ入る"""
+    assert rename_by_wildcards("node-{0-3}-*", "node-2-a", "gpu-*-*") == "gpu-2-a"
+    assert rename_by_wildcards("node-{00-10}", "node-07", "gpu-*") == "gpu-07"
+    assert rename_by_wildcards("node-?-a", "node-5-a", "gpu-*") == "gpu-5"
 
 
-def test_rename_by_wildcards_requires_star_pattern_for_target():
-    """対象が * のパターンでなければ、* の置き換えはできない"""
-    with pytest.raises(ValueError, match=r"\* の数"):
-        rename_by_wildcards("crawler-01", "crawler-01", "yt-*")
+def test_rename_by_wildcards_star_means_whole_name_for_plain_target():
+    """対象が名前そのもの（パターンでない）なら、* は今の名前全体を表す"""
+    assert rename_by_wildcards("crawler-01", "crawler-01", "*-old") == "crawler-01-old"
+    assert rename_by_wildcards("crawler-01", "crawler-01", "yt-01") == "yt-01"
+
+
+def test_rename_by_wildcards_explains_mismatched_count_with_example():
+    """* の数が合わないときは、可変部分の数と、最初のVMで何が入るかを示す"""
+    with pytest.raises(ValueError) as error:
+        rename_by_wildcards("node-{0-3}-*", "node-2-a", "gpu-*")
+    message = str(error.value)
+    assert "2か所" in message
+    assert "'2'" in message and "'a'" in message
 
 
 def test_is_name_pattern():

@@ -38,6 +38,7 @@ from mdx_cli.commands._deploy_plan import DeployPlan
 from mdx_cli.commands._name_pattern import (
     expand_name_pattern,
     expand_name_pattern_for_deploy,
+    count_wildcards,
     is_name_pattern,
     match_names,
     rename_by_wildcards,
@@ -604,16 +605,32 @@ def _build_rename_plan(
     return plan
 
 
-def _ask_new_name(vms: list, target: str) -> str:
-    """新しいVM名を対話で聞く。複数台なら * を使ったパターンを聞く。"""
-    if len(vms) == 1:
-        return questionary.text("新しいVM名:", default=vms[0].name).unsafe_ask()
+def _ask_rename_plan(vms: list, all_vms: list, target: str) -> list[tuple[object, str]]:
+    """新しい名前を対話で聞き、使える名前になるまでその場で聞き直す。"""
+    wildcard_count = count_wildcards(target)
+    if wildcard_count == 0:
+        console.print(f"[dim]* は今の名前を表します（例: '*-old' → {vms[0].name}-old）[/dim]")
+        label = "新しいVM名:"
+    else:
+        console.print(f"\n[bold]対象のVM（{len(vms)}台）:[/bold]")
+        for vm in vms:
+            console.print(f"  {vm.name} [dim]({vm.uuid})[/dim]")
+        example = "new-" + "-".join(["*"] * wildcard_count)
+        console.print(
+            f"[dim]* には '{target}' の可変部分（{{範囲}}・?・*）に当たった部分が左から順に入ります"
+            f"（例: '{example}'）[/dim]"
+        )
+        label = "新しい名前のパターン:"
 
-    console.print(f"\n[bold]対象のVM（{len(vms)}台）:[/bold]")
-    for vm in vms:
-        console.print(f"  {vm.name} [dim]({vm.uuid})[/dim]")
-    console.print(f"[dim]* には '{target}' の * に当たった部分が入ります（例: 'new-*'）[/dim]")
-    return questionary.text("新しい名前のパターン:", default=target).unsafe_ask()
+    while True:
+        new_name = questionary.text(label, default="").unsafe_ask().strip()
+        if not new_name:
+            console.print("[yellow]新しい名前を入力してください[/yellow]")
+            continue
+        try:
+            return _build_rename_plan(vms, all_vms, target=target, new_name=new_name, suffix=None)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
 
 
 def _parallel_vm_action(vms: list, action_path_fn, action_name: str, json_fn=None) -> list[dict]:
@@ -801,7 +818,10 @@ def rename(
     ),
     new_name: str = typer.Argument(
         None,
-        help="新しいVM名。* を入れると対象パターンの * に当たった部分が入る (例: 'new-*')。省略時は対話で入力",
+        help=(
+            "新しいVM名。* には対象パターンの可変部分に当たった部分が入る (例: 'new-*')。"
+            "対象が名前1つなら * は今の名前。省略時は対話で入力"
+        ),
     ),
     suffix: str = typer.Option(
         None,
@@ -816,6 +836,7 @@ def rename(
         envvar="MDX_PROJECT_ID",
     ),
     no_wait: bool = typer.Option(False, "--no-wait", help="タスク完了を待たない"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="確認をスキップ"),
 ) -> None:
     """VM名変更（rename 'old-*' 'new-*' や --suffix でパターン一括変更、引数省略で対話）"""
     pid = resolve_project_id(project_id)
@@ -824,6 +845,8 @@ def rename(
     stop_active_spinner()
     if target:
         vms = _resolve_vms(client, target, pid)
+        if is_uuid(target):
+            target = vms[0].name  # * が今の名前を表すように、名前で指定したのと同じに扱う
     else:
         if not all_vms:
             fail("VMがありません")
@@ -834,29 +857,19 @@ def rename(
         target = selected.name
 
     if new_name is None and suffix is None:
-        new_name = _ask_new_name(vms, target)
-
-    try:
-        plan = _build_rename_plan(
-            vms,
-            all_vms,
-            target=target,
-            new_name=new_name,
-            suffix=suffix,
-        )
-    except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1) from exc
+        plan = _ask_rename_plan(vms, all_vms, target)
+    else:
+        try:
+            plan = _build_rename_plan(vms, all_vms, target=target, new_name=new_name, suffix=suffix)
+        except ValueError as exc:
+            fail(str(exc))
 
     console.print(f"\n[bold]{len(plan)}台のVM名を変更します:[/bold]")
     for vm, planned_name in plan:
         console.print(f"  {vm.name} → {planned_name} [dim]({vm.uuid})[/dim]")
 
-    if len(plan) > 1:
-        if not questionary.confirm(
-            f"\n{len(plan)}台のVM名を変更しますか？"
-        ).unsafe_ask():
-            raise typer.Abort()
+    if not yes and not questionary.confirm(f"\n{len(plan)}台のVM名を変更しますか？").unsafe_ask():
+        raise typer.Abort()
 
     task_ids: list[str] = []
     failed = False

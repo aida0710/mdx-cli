@@ -218,7 +218,7 @@ All target arguments accept UUID, exact name, or name pattern.
 | `mdx vm reboot <target> [-p ID]` | none | Reboot. Confirms only when multiple VMs match. |
 | `mdx vm reset <target> [-p ID]` | none | Hard reset. Always asks a high-risk confirmation. |
 | `mdx vm destroy <target> [-p ID] [--no-wait]` | none | Deletes VMs. If any are `PowerON`, force-stops them, waits for power-off, then destroys. Always asks a high-risk confirmation. |
-| `mdx vm rename [target] [new-name] [--suffix TEXT] [-p ID] [--no-wait]` | target omitted means interactive list; new name omitted means prompt | Renames VMs. `*` in the new name receives the part matched by `*` in the target pattern (`rename 'old-*' 'new-*'`); `--suffix` appends to current names. Multiple VMs ask for confirmation. |
+| `mdx vm rename [target] [new-name] [--suffix TEXT] [-p ID] [-y] [--no-wait]` | target omitted means interactive list; new name omitted means prompt (re-asks on invalid input) | Renames VMs. Each `*` in the new name receives, from left to right, the part matched by a variable part (`{range}`, `?`, `*`) of the target pattern (`rename 'node-{0-3}-*' 'gpu-*-*'`); for a plain name or VM ID, `*` is the whole current name. `--suffix` appends to current names. Always shows old → new and asks for confirmation unless `-y`. |
 
 Bulk lifecycle operations run in chunks of 30 and refresh the token before each chunk. Parallel action progress is displayed.
 
