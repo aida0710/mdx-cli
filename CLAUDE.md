@@ -69,6 +69,21 @@ if not questionary.confirm("実行しますか？").ask():
     raise typer.Abort()
 ```
 
+### 複数項目の対話: Step / run_steps / confirm_or_edit
+項目を2つ以上聞くコマンドは `_prompt_steps` を使う。各項目は状態（dict など）に答えを書く関数にして `Step` に包み、
+前の答えを初期値にする。質問は `ask(questionary.xxx(...))` で聞く（手順の中なら Esc で前の項目へ戻る）。
+最後の確認は `confirm_or_edit()`（実行／直す／中止）。対話で入れた値が使えないときは終了せず、理由を出して聞き直す。
+
+```python
+from mdx_cli.commands._prompt_steps import Step, ask, confirm_or_edit, run_steps
+answers = {"name": ""}
+def ask_name() -> None:
+    answers["name"] = ask(questionary.text("名前:", default=answers["name"]))
+steps = [Step("名前", ask_name)]
+run_steps(steps)
+confirm_or_edit(steps, print_summary=lambda: console.print(answers["name"]), message="実行しますか？")
+```
+
 ### コンソールとエラー終了
 Console は個別に生成せず `mdx_cli.console` の共有インスタンスを使う。結果・対話UIは `console`（stdout）、スピナー・進捗は `err_console`（stderr）。エラー表示+終了は `_common.fail()`。
 
@@ -163,6 +178,11 @@ render(data, VM_COLUMNS, json_mode=json)  # --json ならJSON、なければRich
 - IdPフロー: LSチェック → username/password → TOTP → 属性同意 → SAMLResponse → JWT
 - トークン期限切れ: 自動refresh → 失敗時は保存済みID/PWで再ログイン（OTPだけプロンプト）
 - `auth logout` で全クレデンシャル削除
+
+## タブ補完
+
+Tab のたびに起動される補完は、本体を読み込まず `completion_tree_data.py` に保存したコマンド構造で答える（入口は `entry.py`）。
+コマンド・オプション・ヘルプを変えたら `uv run python -m mdx_cli.completion_tree` で作り直す。忘れると `tests/test_completion_tree.py` が落ちる。
 
 ## テスト
 

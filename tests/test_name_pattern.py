@@ -1,7 +1,11 @@
+import pytest
+
 from mdx_cli.commands._name_pattern import (
     expand_name_pattern,
     expand_name_pattern_for_deploy,
+    is_name_pattern,
     match_names,
+    rename_by_wildcards,
 )
 
 
@@ -138,3 +142,43 @@ def test_deploy_alpha_with_zero_padded():
     assert len(result) == 20
     assert result[0] == "vm-a-00"
     assert result[-1] == "vm-b-09"
+
+
+# --- rename_by_wildcards ---
+
+
+def test_rename_by_wildcards_carries_matched_part_to_new_name():
+    """対象パターンの * に当たった部分を、新しい名前の * に入れる"""
+    assert rename_by_wildcards("crawler-*", "crawler-01", "yt-*") == "yt-01"
+    assert rename_by_wildcards("*-old", "worker-3-old", "*") == "worker-3"
+    assert rename_by_wildcards("a-*-b-*", "a-x-b-y", "*_*") == "x_y"
+
+
+def test_rename_by_wildcards_carries_range_and_question_mark():
+    """{範囲} と ? に当たった部分も、* と同じく左から順に新しい名前の * へ入る"""
+    assert rename_by_wildcards("node-{0-3}-*", "node-2-a", "gpu-*-*") == "gpu-2-a"
+    assert rename_by_wildcards("node-{00-10}", "node-07", "gpu-*") == "gpu-07"
+    assert rename_by_wildcards("node-?-a", "node-5-a", "gpu-*") == "gpu-5"
+
+
+def test_rename_by_wildcards_star_means_whole_name_for_plain_target():
+    """対象が名前そのもの（パターンでない）なら、* は今の名前全体を表す"""
+    assert rename_by_wildcards("crawler-01", "crawler-01", "*-old") == "crawler-01-old"
+    assert rename_by_wildcards("crawler-01", "crawler-01", "yt-01") == "yt-01"
+
+
+def test_rename_by_wildcards_explains_mismatched_count_with_example():
+    """* の数が合わないときは、可変部分の数と、最初のVMで何が入るかを示す"""
+    with pytest.raises(ValueError) as error:
+        rename_by_wildcards("node-{0-3}-*", "node-2-a", "gpu-*")
+    message = str(error.value)
+    assert "2か所" in message
+    assert "'2'" in message and "'a'" in message
+
+
+def test_is_name_pattern():
+    """*・?・{範囲} を含むものをパターンとみなす"""
+    assert is_name_pattern("crawler-*")
+    assert is_name_pattern("node-?")
+    assert is_name_pattern("node-{0-3}")
+    assert not is_name_pattern("crawler-01")

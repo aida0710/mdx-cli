@@ -7,6 +7,7 @@ from questionary import Choice
 
 from mdx_cli.api.endpoints.auth import sso_login
 from mdx_cli.commands._common import fail
+from mdx_cli.commands._prompt_steps import Step, ask, run_steps
 from mdx_cli.console import console
 from mdx_cli.credentials.store import (
     CREDENTIAL_BACKEND_FILE,
@@ -24,6 +25,48 @@ def _read_non_interactive_secret(stream: TextIO) -> str:
     if stream.isatty():
         raise ValueError("シークレットが画面に表示されないよう、標準入力をファイルまたはパイプからリダイレクトしてください")
     return stream.readline().strip()
+
+
+def _ask_username_and_password() -> tuple[str, str]:
+    """ユーザー名とパスワードを聞く。パスワードで Esc ならユーザー名へ戻る。"""
+    answers = {"username": "", "password": ""}
+
+    def ask_username() -> None:
+        answers["username"] = ask(questionary.text("ユーザー名:", default=answers["username"]))
+
+    def ask_password() -> None:
+        answers["password"] = ask(questionary.password("パスワード:"))
+
+    run_steps([Step("ユーザー名", ask_username), Step("パスワード", ask_password)])
+    return answers["username"], answers["password"]
+
+
+def _ask_totp_secret(username: str, answers: dict) -> None:
+    """TOTPシークレットを聞く。空や Base32 として読めないときは理由を出して聞き直す。"""
+    while True:
+        secret = ask(questionary.password(f"TOTPシークレット（Base32、ユーザー: {username}）:")).strip()
+        if not secret:
+            console.print("[yellow]シークレットを入力してください[/yellow]")
+            continue
+        try:
+            generate_totp(secret)
+        except ValueError:
+            console.print("[red]シークレットが不正です（認証アプリに表示されるBase32文字列を入力してください）[/red]")
+            continue
+        answers["secret"] = secret
+        return
+
+
+def _ask_matching_otp(answers: dict) -> None:
+    """認証アプリのOTPを聞き、シークレットから作ったOTPと合うまで聞き直す（Esc でシークレットへ戻る）。"""
+    while True:
+        code = ask(questionary.text("認証アプリに表示されている現在のOTP:"))
+        if verify_totp(answers["secret"], code):
+            return
+        console.print(
+            "[red]認証アプリのOTPと一致しません。入れ直すか、Esc でシークレットへ戻ってください"
+            "（端末の時刻のずれも確認してください）[/red]"
+        )
 
 
 @app.command()
@@ -54,8 +97,7 @@ def login(
         console.print(f"ユーザー: [bold]{username}[/bold]")
         console.print("別のユーザーでログインする場合は `mdx auth logout` を実行してください", style="dim")
     else:
-        username = questionary.text("ユーザー名:").unsafe_ask()
-        password = questionary.password("パスワード:").unsafe_ask()
+        username, password = _ask_username_and_password()
 
     def provide_otp() -> str:
         return otp_from_store(store, username) or questionary.text("OTP（ワンタイムパスワード）:").unsafe_ask()
@@ -79,6 +121,15 @@ def login(
         fail(str(exc))
     store.save_token(token)
     console.print(f"ログインしました（ユーザー: {username}）")
+
+
+def _delete_totp_secret(store, ask_confirmation: bool) -> None:
+    if ask_confirmation and not questionary.confirm(
+        "削除するとログイン時にOTPの手入力が必要になります。削除しますか？"
+    ).unsafe_ask():
+        raise typer.Abort()
+    store.delete_totp_secret()
+    console.print("TOTPシークレットを削除しました")
 
 
 @app.command()
@@ -106,27 +157,7 @@ def otp(
         return
 
     if delete:
-        action = "delete"
-    elif non_interactive:
-        action = "register"
-    elif entry:
-        action = questionary.select(
-            f"TOTPシークレットは登録済みです（ユーザー: {entry[0]}）",
-            choices=[
-                Choice("登録し直す", value="register"),
-                Choice("削除する（OTPは手入力に戻る）", value="delete"),
-            ],
-        ).unsafe_ask()
-    else:
-        action = "register"
-
-    if action == "delete":
-        if not non_interactive and not questionary.confirm(
-            "削除するとログイン時にOTPの手入力が必要になります。削除しますか？"
-        ).unsafe_ask():
-            raise typer.Abort()
-        store.delete_totp_secret()
-        console.print("TOTPシークレットを削除しました")
+        _delete_totp_secret(store, ask_confirmation=not non_interactive)
         return
 
     if non_interactive:
@@ -134,19 +165,37 @@ def otp(
             secret = _read_non_interactive_secret(sys.stdin)
         except ValueError as exc:
             fail(str(exc))
+        if not secret or not secret.strip():
+            fail("シークレットが入力されていません")
+        try:
+            generate_totp(secret)
+        except ValueError:
+            fail("シークレットが不正です（認証アプリに表示されるBase32文字列を入力してください）")
     else:
-        secret = questionary.password(f"TOTPシークレット（Base32、ユーザー: {username}）:").unsafe_ask()
-    if not secret or not secret.strip():
-        fail("シークレットが入力されていません")
-    try:
-        generate_totp(secret)
-    except ValueError:
-        fail("シークレットが不正です（認証アプリに表示されるBase32文字列を入力してください）")
+        answers = {"action": "register", "secret": None}
 
-    if not non_interactive:
-        code = questionary.text("認証アプリに表示されている現在のOTP:").unsafe_ask()
-        if not verify_totp(secret, code):
-            fail("認証アプリのOTPと一致しません。シークレットと端末時刻を確認してください")
+        def ask_action() -> None:
+            answers["action"] = ask(questionary.select(
+                f"TOTPシークレットは登録済みです（ユーザー: {entry[0]}）",
+                choices=[
+                    Choice("登録し直す", value="register"),
+                    Choice("削除する（OTPは手入力に戻る）", value="delete"),
+                ],
+                default=answers["action"],
+            ))
+
+        def is_registering() -> bool:
+            return answers["action"] == "register"
+
+        run_steps([
+            Step("登録し直すか削除するか", ask_action, is_needed=lambda: entry is not None),
+            Step("TOTPシークレット", lambda: _ask_totp_secret(username, answers), is_needed=is_registering),
+            Step("確認用のOTP", lambda: _ask_matching_otp(answers), is_needed=is_registering),
+        ])
+        if answers["action"] == "delete":
+            _delete_totp_secret(store, ask_confirmation=True)
+            return
+        secret = answers["secret"]
 
     store.save_totp_secret(username, secret)
     console.print(f"TOTPシークレットを登録しました（ユーザー: {username}）")

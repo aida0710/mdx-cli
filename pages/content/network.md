@@ -49,3 +49,5 @@ mdx network acl add      # 追加（プロトコル・アドレス・ポート�
 mdx network acl edit     # 編集（一覧から選択、現在値をデフォルト表示）
 mdx network acl delete   # 削除（一覧から選択可能）
 ```
+
+マスクはプレフィックス長（`0`〜`32`）で入力する。既定は送信元 `0`（全体）、宛先 `32`（1台）。追加・編集はMDX側のタスクとして非同期に反映されるため、`mdx network acl list` で反映を確かめる。

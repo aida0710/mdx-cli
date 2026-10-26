@@ -1,10 +1,11 @@
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
-from mdx_cli.commands.vm import _list_pubkeys, _pubkey_preview, app
+from mdx_cli.commands._deploy_steps import list_pubkeys, pubkey_preview
+from mdx_cli.commands.vm import app
 from mdx_cli.models.network import Segment
 from mdx_cli.models.template import Template
 from mdx_cli.models.vm import VM, VMDeployResponse
@@ -38,6 +39,31 @@ def test_vm_show_json():
             assert result.exit_code == 0
             data = json.loads(result.output)
             assert data["name"] == "test-vm"
+
+
+def test_vm_show_pattern_shows_every_matched_vm():
+    """show に * のパターンを渡すと、当たったVMをすべて表示する"""
+    vms = [_make_vm("crawler-01", "uuid-0"), _make_vm("crawler-02", "uuid-1")]
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms) as mock_resolve:
+        with patch("mdx_cli.commands.vm._fetch_vm_details", return_value=vms):
+            with patch("mdx_cli.commands.vm.get_client"):
+                result = runner.invoke(app, ["show", "crawler-*"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_resolve.call_args.args[1] == "crawler-*"
+    assert "crawler-01" in result.output
+    assert "crawler-02" in result.output
+
+
+def test_vm_show_pattern_json_is_list():
+    vms = [_make_vm("crawler-01", "uuid-0"), _make_vm("crawler-02", "uuid-1")]
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm._fetch_vm_details", return_value=vms):
+            with patch("mdx_cli.commands.vm.get_client"):
+                result = runner.invoke(app, ["show", "crawler-*", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert [vm["name"] for vm in json.loads(result.output)] == ["crawler-01", "crawler-02"]
 
 
 def test_vm_stop_by_uuid():
@@ -77,7 +103,9 @@ def test_vm_start_pattern():
                     mock_action.assert_called_once()
 
 
-def test_vm_rename_single():
+@patch("mdx_cli.commands._prompt_steps.questionary")
+def test_vm_rename_single(mock_steps_q):
+    mock_steps_q.select.return_value.unsafe_ask.return_value = "execute"
     vm = _make_vm("worker-0", "uuid-0", status="PowerOFF")
     with patch("mdx_cli.commands.vm._resolve_vms", return_value=[vm]):
         with patch("mdx_cli.commands.vm.list_vms", return_value=[vm]):
@@ -95,16 +123,80 @@ def test_vm_rename_single():
                             "mdx_cli.commands.vm.resolve_project_id",
                             return_value="proj-1",
                         ):
-                            result = runner.invoke(
-                                app,
-                                ["rename", vm.uuid, "worker-0-vpn", "-p", "proj-1"],
-                            )
+                            with patch("mdx_cli.commands.vm.questionary"):
+                                result = runner.invoke(
+                                    app,
+                                    ["rename", vm.uuid, "worker-0-vpn", "-p", "proj-1"],
+                                )
 
     assert result.exit_code == 0, result.output
+    assert "worker-0 → worker-0-vpn" in result.output
+    mock_steps_q.select.assert_called_once()
     mock_rename.assert_called_once_with(mock_rename.call_args.args[0], vm.uuid, "worker-0-vpn")
 
 
-def test_vm_rename_pattern_with_suffix():
+def test_vm_rename_single_yes_skips_confirmation_and_star_means_current_name():
+    """-y なら確認しない。名前1つの対象では * が今の名前全体を表す"""
+    vm = _make_vm("worker-0", "uuid-0", status="PowerOFF")
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=[vm]):
+        with patch("mdx_cli.commands.vm.list_vms", return_value=[vm]):
+            with patch("mdx_cli.commands.vm.rename_vm", return_value="task-rename") as mock_rename:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                            result = runner.invoke(
+                                app, ["rename", "worker-0", "*-old", "-y", "--no-wait"]
+                            )
+
+    assert result.exit_code == 0, result.output
+    mock_q.confirm.assert_not_called()
+    assert mock_rename.call_args.args[1:] == ("uuid-0", "worker-0-old")
+
+
+def test_vm_rename_uuid_target_star_means_current_name():
+    """UUID で指定しても、* は今の名前全体を表す"""
+    vm = _make_vm("worker-0", "00000000-0000-0000-0000-0000000000aa", status="PowerOFF")
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=[vm]):
+        with patch("mdx_cli.commands.vm.list_vms", return_value=[vm]):
+            with patch("mdx_cli.commands.vm.rename_vm", return_value="task-rename") as mock_rename:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        result = runner.invoke(app, ["rename", vm.uuid, "*-old", "-y", "--no-wait"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_rename.call_args.args[2] == "worker-0-old"
+
+
+@patch("mdx_cli.commands._prompt_steps.questionary")
+def test_vm_rename_interactive_reasks_after_invalid_name(mock_steps_q):
+    """対話で入力した名前が使えなければ、理由を出してその場で聞き直す"""
+    mock_steps_q.select.return_value.unsafe_ask.return_value = "execute"
+    vms = [
+        _make_vm("crawler-01", "uuid-0", status="PowerOFF"),
+        _make_vm("crawler-02", "uuid-1", status="PowerOFF"),
+    ]
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm.list_vms", return_value=vms):
+            with patch(
+                "mdx_cli.commands.vm._parallel_vm_action",
+                return_value=[{"task_id": "task-0"}, {"task_id": "task-1"}],
+            ) as mock_action:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                            mock_q.text.return_value.unsafe_ask.side_effect = ["", "yt", "yt-*"]
+                            result = runner.invoke(app, ["rename", "crawler-*", "--no-wait"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_q.text.call_count == 3
+    assert "新しい名前に * を入れる" in result.output
+    json_fn = mock_action.call_args.kwargs["json_fn"]
+    assert [json_fn(vm) for vm in vms] == [{"vm_name": "yt-01"}, {"vm_name": "yt-02"}]
+
+
+@patch("mdx_cli.commands._prompt_steps.questionary")
+def test_vm_rename_pattern_with_suffix(mock_steps_q):
+    mock_steps_q.select.return_value.unsafe_ask.return_value = "execute"
     vms = [
         _make_vm("worker-0", "uuid-0", status="PowerOFF"),
         _make_vm("worker-1", "uuid-1", status="PowerOFF"),
@@ -120,8 +212,7 @@ def test_vm_rename_pattern_with_suffix():
                         "mdx_cli.commands.vm.resolve_project_id",
                         return_value="proj-1",
                     ):
-                        with patch("mdx_cli.commands.vm.questionary") as mock_q:
-                            mock_q.confirm.return_value.unsafe_ask.return_value = True
+                        with patch("mdx_cli.commands.vm.questionary"):
                             result = runner.invoke(
                                 app,
                                 [
@@ -160,7 +251,79 @@ def test_vm_rename_rejects_bulk_new_name():
                     )
 
     assert result.exit_code == 1
-    assert "複数VMの名前変更には --suffix" in result.output
+    assert "新しい名前に * を入れる" in result.output
+
+
+@patch("mdx_cli.commands._prompt_steps.questionary")
+def test_vm_rename_pattern_to_pattern_carries_matched_part(mock_steps_q):
+    """rename 'crawler-*' 'yt-*' で * に当たった部分を引き継いで一括変更する"""
+    mock_steps_q.select.return_value.unsafe_ask.return_value = "execute"
+    vms = [
+        _make_vm("crawler-01", "uuid-0", status="PowerOFF"),
+        _make_vm("crawler-02", "uuid-1", status="PowerOFF"),
+    ]
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm.list_vms", return_value=vms):
+            with patch(
+                "mdx_cli.commands.vm._parallel_vm_action",
+                return_value=[{"task_id": "task-0"}, {"task_id": "task-1"}],
+            ) as mock_action:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands.vm.questionary"):
+                            result = runner.invoke(
+                                app, ["rename", "crawler-*", "yt-*", "--no-wait"]
+                            )
+
+    assert result.exit_code == 0, result.output
+    assert "crawler-01 → yt-01" in result.output
+    json_fn = mock_action.call_args.kwargs["json_fn"]
+    assert [json_fn(vm) for vm in vms] == [{"vm_name": "yt-01"}, {"vm_name": "yt-02"}]
+
+
+@patch("mdx_cli.commands._prompt_steps.questionary")
+def test_vm_rename_without_arguments_selects_vm_and_asks_new_name(mock_steps_q):
+    """引数なしなら一覧から選び、現在名を初期値に新しい名前を聞く"""
+    mock_steps_q.select.return_value.unsafe_ask.return_value = "execute"
+    vm = _make_vm("worker-0", "uuid-0", status="PowerOFF")
+    with patch("mdx_cli.commands.vm.list_vms", return_value=[vm]):
+        with patch("mdx_cli.commands.vm.select_from_list", return_value=vm):
+            with patch("mdx_cli.commands.vm.rename_vm", return_value="task-rename") as mock_rename:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                            mock_q.text.return_value.unsafe_ask.return_value = "worker-new"
+                            result = runner.invoke(app, ["rename", "--no-wait"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_q.text.call_args.kwargs["default"] == ""
+    assert mock_rename.call_args.args[1:] == ("uuid-0", "worker-new")
+
+
+@patch("mdx_cli.commands._prompt_steps.questionary")
+def test_vm_rename_pattern_without_new_name_asks_new_pattern(mock_steps_q):
+    """パターンだけ渡されたら、対象を見せてから新しい名前のパターンを聞く"""
+    mock_steps_q.select.return_value.unsafe_ask.return_value = "execute"
+    vms = [
+        _make_vm("crawler-01", "uuid-0", status="PowerOFF"),
+        _make_vm("crawler-02", "uuid-1", status="PowerOFF"),
+    ]
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm.list_vms", return_value=vms):
+            with patch(
+                "mdx_cli.commands.vm._parallel_vm_action",
+                return_value=[{"task_id": "task-0"}, {"task_id": "task-1"}],
+            ) as mock_action:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                            mock_q.text.return_value.unsafe_ask.return_value = "yt-*"
+                            result = runner.invoke(app, ["rename", "crawler-*", "--no-wait"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_q.text.call_args.kwargs["default"] == ""
+    json_fn = mock_action.call_args.kwargs["json_fn"]
+    assert [json_fn(vm) for vm in vms] == [{"vm_name": "yt-01"}, {"vm_name": "yt-02"}]
 
 
 def test_vm_rename_rejects_existing_name_collision():
@@ -260,8 +423,10 @@ def test_vm_reconfigure_all_details_failed_exits():
                     assert "構成変更可能なVMがありません" in result.output
 
 
-def test_vm_reconfigure_pattern_matches_multiple_vms():
+@patch("mdx_cli.commands._prompt_steps.questionary")
+def test_vm_reconfigure_pattern_matches_multiple_vms(mock_steps_q):
     """パターン指定で複数台マッチ → _parallel_vm_action で一括reconfigure。"""
+    mock_steps_q.select.return_value.unsafe_ask.return_value = "execute"
     vms_brief = [
         _make_vm("worker-0", "uuid-0", status="PowerOFF"),
         _make_vm("worker-1", "uuid-1", status="PowerOFF"),
@@ -503,7 +668,7 @@ def test_list_pubkeys_orders_standard_keys_first(tmp_path):
     (ssh_dir / "config").write_text("config")
 
     with patch.object(Path, "home", return_value=tmp_path):
-        result = _list_pubkeys()
+        result = list_pubkeys()
 
     assert [p.name for p in result] == [
         "id_ed25519.pub",
@@ -516,7 +681,7 @@ def test_list_pubkeys_orders_standard_keys_first(tmp_path):
 def test_list_pubkeys_returns_empty_when_no_ssh_dir(tmp_path):
     """~/.ssh が無ければ空リストを返す。"""
     with patch.object(Path, "home", return_value=tmp_path):
-        assert _list_pubkeys() == []
+        assert list_pubkeys() == []
 
 
 
@@ -529,14 +694,14 @@ def test_pubkey_preview_abbreviates_long_content(tmp_path):
         "user@example.com"
     )
     f.write_text(content + "\n")
-    assert _pubkey_preview(f) == f"{content[:30]}...{content[-30:]}"
+    assert pubkey_preview(f) == f"{content[:30]}...{content[-30:]}"
 
 
 def test_pubkey_preview_short_content_shown_as_is(tmp_path):
     """短い内容（63文字以下）はそのまま返す。"""
     f = tmp_path / "k.pub"
     f.write_text("ssh-rsa SHORT")
-    assert _pubkey_preview(f) == "ssh-rsa SHORT"
+    assert pubkey_preview(f) == "ssh-rsa SHORT"
 
 
 def _deploy_common_args(key_omitted=True):
@@ -581,8 +746,8 @@ def test_vm_deploy_interactive_lists_pubkeys_and_selects_by_number(tmp_path):
             with patch("mdx_cli.commands.vm.deploy_vm", side_effect=mock_deploy):
                 with patch("mdx_cli.commands.vm.get_client"):
                     with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
-                        with patch("mdx_cli.commands.vm._list_pubkeys", return_value=keys):
-                            with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                        with patch("mdx_cli.commands._deploy_steps.list_pubkeys", return_value=keys):
+                            with patch("mdx_cli.commands._deploy_steps.questionary") as mock_q:
                                 mock_q.text.return_value.unsafe_ask.return_value = "3"
                                 result = runner.invoke(app, _deploy_common_args())
 
@@ -611,8 +776,8 @@ def test_vm_deploy_interactive_warns_when_no_pubkey(tmp_path):
             with patch("mdx_cli.commands.vm.deploy_vm", side_effect=mock_deploy):
                 with patch("mdx_cli.commands.vm.get_client"):
                     with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
-                        with patch("mdx_cli.commands.vm._list_pubkeys", return_value=[]):
-                            with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                        with patch("mdx_cli.commands._deploy_steps.list_pubkeys", return_value=[]):
+                            with patch("mdx_cli.commands._deploy_steps.questionary") as mock_q:
                                 mock_q.text.return_value.unsafe_ask.return_value = str(key_file)
                                 result = runner.invoke(app, _deploy_common_args())
 
@@ -871,8 +1036,8 @@ def test_vm_deploy_interactive_template_selection(tmp_path):
     assert captured[0].catalog == "tmpl-2"
 
 
-def test_vm_reconfigure_stops_running_vms_first():
-    """稼働中VMがあれば確認のうえシャットダウン→停止待ち→構成変更の順に実行する。"""
+def test_vm_reconfigure_stops_running_vms_after_confirmation():
+    """稼働中VMは、確認で実行を選んでからシャットダウン→停止待ち→構成変更の順に実行する。"""
     vms_brief = [_make_vm("worker-0", "uuid-0", status="PowerON")]
     vms_detail = [_make_vm_with_details("worker-0", pack_type="cpu", pack_num=4, disk_count=1)]
 
@@ -885,15 +1050,38 @@ def test_vm_reconfigure_stops_running_vms_first():
          patch("mdx_cli.commands.vm.get_client"), \
          patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"), \
          patch("mdx_cli.commands._common.questionary") as mock_common_q, \
-         patch("mdx_cli.commands.vm.questionary") as mock_q:
+         patch("mdx_cli.commands._prompt_steps.questionary") as mock_steps_q:
         mock_common_q.text.return_value.unsafe_ask.side_effect = ["8", "40"]
-        mock_q.confirm.return_value.unsafe_ask.return_value = True
+        mock_steps_q.select.return_value.unsafe_ask.return_value = "execute"
         result = runner.invoke(app, ["reconfigure", "worker-*", "-p", "proj-1", "--no-wait"])
 
     assert result.exit_code == 0, result.output
+    assert "シャットダウンしてから構成変更します" in result.output
     # シャットダウンの一括実行 → 停止待ち の順で呼ばれる
     assert mock_action.call_args[0][2] == "シャットダウン中"
     mock_ensure.assert_called_once_with(vms_detail)
+
+
+def test_vm_reconfigure_cancel_does_not_stop_running_vms():
+    """確認で中止したら、稼働中のVMを止めない"""
+    vms_brief = [_make_vm("worker-0", "uuid-0", status="PowerON")]
+    vms_detail = [_make_vm_with_details("worker-0", pack_type="cpu", pack_num=4, disk_count=1)]
+
+    with patch("mdx_cli.commands.vm._resolve_vms", return_value=vms_brief), \
+         patch("mdx_cli.commands.vm._fetch_vm_details", return_value=vms_detail), \
+         patch("mdx_cli.commands.vm._parallel_vm_action") as mock_action, \
+         patch("mdx_cli.commands.vm.reconfigure_vm") as mock_reconfigure, \
+         patch("mdx_cli.commands.vm.get_client"), \
+         patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"), \
+         patch("mdx_cli.commands._common.questionary") as mock_common_q, \
+         patch("mdx_cli.commands._prompt_steps.questionary") as mock_steps_q:
+        mock_common_q.text.return_value.unsafe_ask.side_effect = ["8", "40"]
+        mock_steps_q.select.return_value.unsafe_ask.return_value = "cancel"
+        result = runner.invoke(app, ["reconfigure", "worker-*", "-p", "proj-1", "--no-wait"])
+
+    assert result.exit_code == 1
+    mock_action.assert_not_called()
+    mock_reconfigure.assert_not_called()
 
 
 def _make_vm_with_network(name="web-1", uuid="uuid-net", host_name=None):
@@ -1089,3 +1277,145 @@ def test_vm_resources_prints_grand_total():
     assert result.exit_code == 0, result.output
     assert "2台" in result.output
     assert "140 GB" in result.output
+
+
+def _scripted_text(answers: list, defaults: list):
+    """questionary.text の代わり。answers を順に返す（None は Enter で初期値のまま）。初期値を defaults に記録する。"""
+    remaining = iter(answers)
+
+    def _text(label, default="", **kwargs):
+        defaults.append(default)
+        answer = next(remaining)
+        question = MagicMock()
+        question.unsafe_ask.return_value = default if answer is None else answer
+        return question
+
+    return _text
+
+
+def test_vm_deploy_interactive_reasks_bad_key_and_edits_pack_type(tmp_path):
+    """鍵のパスが無ければ聞き直す。確認で「直す」→パックタイプを gpu にすると、パック数は gpu の範囲で聞き直す"""
+    key_file = tmp_path / "id.pub"
+    key_file.write_text("ssh-ed25519 AAAAKEY")
+    captured_requests: list = []
+
+    def mock_deploy(client, req):
+        captured_requests.append(req)
+        return VMDeployResponse(task_id=["task-0"])
+
+    step_defaults: list = []
+    number_defaults: list = []
+    with patch("mdx_cli.commands.vm.list_templates", return_value=[_make_template()]):
+        with patch("mdx_cli.commands.vm.list_segments", return_value=[_make_segment()]):
+            with patch("mdx_cli.commands.vm.deploy_vm", side_effect=mock_deploy):
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands._deploy_steps.list_pubkeys", return_value=[]):
+                            with patch("mdx_cli.commands._deploy_steps.questionary") as mock_q:
+                                mock_q.text.side_effect = _scripted_text(
+                                    [str(tmp_path / "missing.pub"), str(key_file), "vm-1"], step_defaults
+                                )
+                                mock_q.select.return_value.unsafe_ask.side_effect = ["cpu", "spot", "gpu", "spot"]
+                                mock_q.confirm.return_value.unsafe_ask.return_value = False
+                                with patch("mdx_cli.commands._common.questionary") as mock_common_q:
+                                    mock_common_q.text.side_effect = _scripted_text(
+                                        ["100", "40", None, None], number_defaults
+                                    )
+                                    with patch("mdx_cli.commands._prompt_steps.questionary") as mock_steps_q:
+                                        # 項目の並び: SSH公開鍵, VM名, パックタイプ, ...
+                                        mock_steps_q.select.return_value.unsafe_ask.side_effect = [
+                                            "edit", 2, "execute",
+                                        ]
+                                        result = runner.invoke(app, ["deploy", "-t", "Ubuntu", "--no-wait"])
+
+    assert result.exit_code == 0, result.output
+    assert "ファイルが見つかりません" in result.output
+    # 2回目の鍵の入力は、前に入れた（見つからなかった）パスを初期値にする
+    assert step_defaults[1] == str(tmp_path / "missing.pub")
+    # gpu の上限は 8 なので、前の 100 ではなく gpu の既定値を初期値にする
+    assert number_defaults[2] == "1"
+    request = captured_requests[0]
+    assert (request.pack_type, request.pack_num, request.disk_size) == ("gpu", 1, 40)
+
+
+def test_vm_deploy_rejects_pack_num_option_over_limit_of_chosen_type(tmp_path):
+    """引数のパック数が、対話で選んだパックタイプの上限を超えたら終了する"""
+    key_file = tmp_path / "id.pub"
+    key_file.write_text("ssh-ed25519 AAAAKEY")
+    with patch("mdx_cli.commands.vm.list_templates", return_value=[_make_template()]):
+        with patch("mdx_cli.commands.vm.list_segments", return_value=[_make_segment()]):
+            with patch("mdx_cli.commands.vm.deploy_vm") as mock_deploy:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands._deploy_steps.questionary") as mock_q:
+                            mock_q.select.return_value.unsafe_ask.return_value = "gpu"
+                            result = runner.invoke(app, [
+                                "deploy", "-t", "Ubuntu", "-n", "vm-1", "--pack-num", "20",
+                                "--disk", "40", "--service-level", "spot", "-k", str(key_file), "-y",
+                            ])
+
+    assert result.exit_code == 1
+    assert "1〜8" in result.output
+    mock_deploy.assert_not_called()
+
+
+@patch("mdx_cli.commands._prompt_steps.questionary")
+def test_vm_rename_escape_on_new_name_goes_back_to_vm_selection(mock_steps_q):
+    """新しい名前で Esc を押すと VM の選択へ戻り、選び直したVMを変更する"""
+    from mdx_cli.commands._prompt_steps import BACK
+
+    mock_steps_q.select.return_value.unsafe_ask.return_value = "execute"
+    vms = [_make_vm("worker-0", "uuid-0", status="PowerOFF"), _make_vm("worker-1", "uuid-1", status="PowerOFF")]
+    with patch("mdx_cli.commands.vm.list_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm.select_from_list", side_effect=[vms[0], vms[1]]) as mock_select:
+            with patch("mdx_cli.commands.vm.rename_vm", return_value="task-rename") as mock_rename:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                            mock_q.text.return_value.unsafe_ask.side_effect = [BACK, "worker-new"]
+                            result = runner.invoke(app, ["rename", "--no-wait"])
+
+    assert result.exit_code == 0, result.output
+    # 戻ったときは前に選んだVMを初期値にする
+    assert mock_select.call_args.kwargs["default"] == 1
+    assert mock_rename.call_args.args[1:] == ("uuid-1", "worker-new")
+
+
+@patch("mdx_cli.commands._prompt_steps.questionary")
+def test_vm_rename_edit_vm_rebuilds_plan_for_new_name_argument(mock_steps_q):
+    """新しい名前を引数で渡し、確認の「直す」でVMを選び直したら、選び直したVMで計画を作り直す"""
+    mock_steps_q.select.return_value.unsafe_ask.side_effect = ["edit", 0, "execute"]
+    vms = [_make_vm("worker-0", "uuid-0", status="PowerOFF"), _make_vm("worker-1", "uuid-1", status="PowerOFF")]
+    with patch("mdx_cli.commands.vm.list_vms", return_value=vms):
+        with patch("mdx_cli.commands.vm.select_from_list", side_effect=[vms[0], vms[1]]):
+            with patch("mdx_cli.commands.vm.rename_vm", return_value="task-rename") as mock_rename:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        result = runner.invoke(app, ["rename", "--suffix", "-old", "--no-wait"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_rename.call_args.args[1:] == ("uuid-1", "worker-1-old")
+
+
+def test_vm_deploy_rechecks_pack_num_option_after_editing_pack_type(tmp_path):
+    """引数のパック数は、確認の「直す」でパックタイプを変えたあとも上限を確かめ直す"""
+    key_file = tmp_path / "id.pub"
+    key_file.write_text("ssh-ed25519 AAAAKEY")
+    with patch("mdx_cli.commands.vm.list_templates", return_value=[_make_template()]):
+        with patch("mdx_cli.commands.vm.list_segments", return_value=[_make_segment()]):
+            with patch("mdx_cli.commands.vm.deploy_vm") as mock_deploy:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands._deploy_steps.questionary") as mock_q:
+                            mock_q.select.return_value.unsafe_ask.side_effect = ["cpu", "gpu"]
+                            mock_q.confirm.return_value.unsafe_ask.return_value = False
+                            with patch("mdx_cli.commands._prompt_steps.questionary") as mock_steps_q:
+                                mock_steps_q.select.return_value.unsafe_ask.side_effect = ["edit", 0, "execute"]
+                                result = runner.invoke(app, [
+                                    "deploy", "-t", "Ubuntu", "-n", "vm-1", "--pack-num", "20",
+                                    "--disk", "40", "--service-level", "spot", "-k", str(key_file),
+                                ])
+
+    assert result.exit_code == 1
+    assert "1〜8" in result.output
+    mock_deploy.assert_not_called()

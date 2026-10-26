@@ -11,10 +11,11 @@ dependencies = [
     "cryptography>=42.0",
     "beautifulsoup4>=4.12",
     "questionary>=2.0",
+    "prompt-toolkit>=3.0",  # Esc で前の項目へ戻るキーの割り当てに直接使う
 ]
 
 [project.scripts]
-mdx = "mdx_cli.main:cli"
+mdx = "mdx_cli.entry:cli"
 
 [build-system]
 requires = ["hatchling"]
