@@ -6,6 +6,7 @@ from mdx_cli.api.endpoints.networks import (
     delete_dnat,
     list_assignable_ips,
     list_dnats,
+    list_segments,
     update_dnat,
 )
 from mdx_cli.api.spinner import stop_active_spinner
@@ -14,10 +15,10 @@ from mdx_cli.commands._common import (
     find_by_uuid,
     get_client,
     resolve_project_id,
-    resolve_segment_id,
     select_from_list,
     select_or_exit,
 )
+from mdx_cli.commands._prompt_steps import Step, ask, confirm_or_edit, run_steps
 from mdx_cli.console import console
 from mdx_cli.output.formatting import render
 from mdx_cli.models.network import DNATRequest
@@ -43,6 +44,64 @@ def dnat_list(
     render(dnats, DNAT_COLUMNS, json_mode=json)
 
 
+def _dnat_steps(answers: dict, ips: list[str], segments: list, current_ip: str | None = None) -> list[Step]:
+    """DNATの各項目を聞く手順（add / edit 共通）。answers の今の値を初期値にし、答えで上書きする。"""
+    def default_number(items: list, value) -> int | None:
+        return items.index(value) + 1 if value in items else None
+
+    def ask_pool_address() -> None:
+        answers["pool_address"] = select_from_list(
+            ips,
+            lambda ip: f"{ip} [cyan](現在)[/cyan]" if ip == current_ip else ip,
+            title="グローバルIP:",
+            default=default_number(ips, answers["pool_address"]),
+        )
+
+    def ask_segment() -> None:
+        answers["segment"] = select_from_list(
+            segments,
+            lambda segment: f"{segment.name} [dim]({segment.uuid})[/dim]",
+            title="セグメント:",
+            default=default_number(segments, answers["segment"]),
+        )
+
+    def ask_dst_address() -> None:
+        answers["dst_address"] = ask(questionary.text(
+            "宛先アドレス（プライベートIP）:", default=answers["dst_address"]
+        ))
+
+    return [
+        Step("グローバルIP", ask_pool_address),
+        Step("セグメント", ask_segment, is_needed=lambda: len(segments) > 1),
+        Step("宛先アドレス", ask_dst_address),
+    ]
+
+
+def _ask_dnat_request(answers: dict, steps: list[Step], header: str, message: str) -> DNATRequest:
+    """各項目を聞き、内容を見せて「実行／直す／中止」を確認する。"""
+    def print_summary() -> None:
+        console.print(f"\n[bold]{header}[/bold]")
+        console.print(f"  グローバルIP: {answers['pool_address']}")
+        console.print(f"  セグメント:   {answers['segment'].name}")
+        console.print(f"  宛先:         {answers['dst_address']}")
+
+    run_steps(steps)
+    confirm_or_edit(steps, print_summary=print_summary, message=message)
+    return DNATRequest(
+        pool_address=answers["pool_address"],
+        segment=answers["segment"].uuid,
+        dst_address=answers["dst_address"],
+    )
+
+
+def _list_segments_or_fail(client, pid: str) -> list:
+    segments = list_segments(client, pid)
+    stop_active_spinner()
+    if not segments:
+        fail("セグメントが見つかりません")
+    return segments
+
+
 @app.command("add")
 def dnat_add(
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
@@ -51,32 +110,15 @@ def dnat_add(
     pid = resolve_project_id(project_id)
     client = get_client()
 
-    # グローバルIP選択
     ips = list_assignable_ips(client, pid)
     stop_active_spinner()
-
     if not ips:
         fail("割当可能なグローバルIPがありません")
+    segments = _list_segments_or_fail(client, pid)
 
-    pool_address = select_from_list(ips, lambda ip: ip, title="グローバルIP:")
-
-    # セグメント選択
-    seg_id = resolve_segment_id(client, None, project_id)
-
-    # 宛先アドレス
-    dst_address = questionary.text("宛先アドレス（プライベートIP）:").unsafe_ask()
-
-    console.print("\n[bold]確認:[/bold]")
-    console.print(f"  グローバルIP: {pool_address}")
-    console.print(f"  宛先:         {dst_address}")
-
-    if not questionary.confirm("\n追加しますか？").unsafe_ask():
-        raise typer.Abort()
-
-    req = DNATRequest(
-        pool_address=pool_address,
-        segment=seg_id,
-        dst_address=dst_address,
+    answers = {"pool_address": None, "segment": segments[0], "dst_address": ""}
+    req = _ask_dnat_request(
+        answers, _dnat_steps(answers, ips, segments), header="確認:", message="追加しますか？"
     )
     create_dnat(client, req)
     stop_active_spinner()
@@ -92,7 +134,6 @@ def dnat_edit(
     pid = resolve_project_id(project_id)
     client = get_client()
 
-    # DNAT選択
     dnats = list_dnats(client, pid)
     stop_active_spinner()
 
@@ -106,39 +147,23 @@ def dnat_edit(
     else:
         selected = find_by_uuid(dnats, dnat_id, label="DNAT")
 
-    # グローバルIP選択
     ips = list_assignable_ips(client, pid)
     stop_active_spinner()
     # 現在のIPも選択肢に含める
     if selected.pool_address not in ips:
         ips.insert(0, selected.pool_address)
+    segments = _list_segments_or_fail(client, pid)
+    # 一覧の応答の segment はセグメント名
+    current_segment = next((s for s in segments if s.name == selected.segment), segments[0])
 
     console.print("\n[bold]現在の値（Enterでそのまま）:[/bold]")
-    pool_address = select_from_list(
-        ips,
-        lambda ip: f"{ip} [cyan](現在)[/cyan]" if ip == selected.pool_address else ip,
-        title="グローバルIP:",
-        default=ips.index(selected.pool_address) + 1,
-    )
-
-    # セグメント
-    seg_id = resolve_segment_id(client, None, project_id)
-
-    # 宛先アドレス
-    dst_address = questionary.text("宛先アドレス:", default=selected.dst_address).unsafe_ask()
-
-    console.print("\n[bold]変更後:[/bold]")
-    console.print(f"  グローバルIP: {pool_address}")
-    console.print(f"  宛先:         {dst_address}")
-
-    if not questionary.confirm("\n更新しますか？").unsafe_ask():
-        raise typer.Abort()
-
-    req = DNATRequest(
-        pool_address=pool_address,
-        segment=seg_id,
-        dst_address=dst_address,
-    )
+    answers = {
+        "pool_address": selected.pool_address,
+        "segment": current_segment,
+        "dst_address": selected.dst_address,
+    }
+    steps = _dnat_steps(answers, ips, segments, current_ip=selected.pool_address)
+    req = _ask_dnat_request(answers, steps, header="変更後:", message="更新しますか？")
     update_dnat(client, dnat_id, req)
     stop_active_spinner()
     console.print("[green]DNAT更新リクエストを受け付けました[/green]")

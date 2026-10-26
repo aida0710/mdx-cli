@@ -1,15 +1,22 @@
 # MDX CLI Specification
 
-This reference describes the `mdx` CLI implemented by `mdx_cli.main:app`.
+This reference describes the `mdx` CLI implemented by `mdx_cli.main:app` (entry point `mdx_cli.entry:cli`).
 
 ## Runtime
 
-- Package script: `mdx = mdx_cli.main:app`
+- Package script: `mdx = mdx_cli.entry:cli` (answers shell completion from the saved command tree without loading the app)
 - Python: 3.13+
 - Install locally: `uv tool install .`
 - Update locally: `git pull && uv tool install . --force`
 - Must run from MDX internal network, MDX VPN, or an MDX VM.
 - API base: `https://oprpl.mdx.jp`
+
+## Interactive Prompts
+
+- Commands that ask several items (`vm deploy`, `vm reconfigure`, `vm rename`, `network acl add/edit`, `network dnat add/edit`, `auth login`, `auth otp`) go back to the previous item on Esc; earlier answers become the defaults.
+- Their final confirmation is a choice of 実行する / 直す / 中止する. 直す re-asks from the chosen item to the end.
+- Invalid interactive input (missing key file, name collision, wrong OTP, bad mask) is re-asked instead of exiting. Values given as options are still validated and exit on error.
+- `vm reconfigure` shuts down running VMs only after the final confirmation.
 - SSO IdP: `mdxidm.mdx.jp`
 
 ## Global Options
@@ -143,7 +150,7 @@ with ordering were also exercised successfully.
 | Command | Arguments/options | Purpose |
 |---|---|---|
 | `mdx vm list [-p ID] [--json]` | project optional | List VMs. |
-| `mdx vm show [target] [-p ID] [--json]` | target is UUID or exact VM name; omitted means interactive list | Show VM detail including OS, resources, disks, service networks, storage networks, and VMware Tools. |
+| `mdx vm show [target] [-p ID] [--json]` | target is UUID, VM name, or pattern; omitted means interactive list | Show VM detail including OS, resources, disks, service networks, storage networks, and VMware Tools. A pattern shows every matched VM; `--json` then prints an array. |
 | `mdx vm sync [-p ID]` | project optional | Request VM information sync. |
 | `mdx vm csv [target] [-p ID] [-o PATH]` | target pattern optional | Export Web portal-compatible CSV. Without `-o`, writes stdout. |
 
@@ -218,6 +225,7 @@ All target arguments accept UUID, exact name, or name pattern.
 | `mdx vm reboot <target> [-p ID]` | none | Reboot. Confirms only when multiple VMs match. |
 | `mdx vm reset <target> [-p ID]` | none | Hard reset. Always asks a high-risk confirmation. |
 | `mdx vm destroy <target> [-p ID] [--no-wait]` | none | Deletes VMs. If any are `PowerON`, force-stops them, waits for power-off, then destroys. Always asks a high-risk confirmation. |
+| `mdx vm rename [target] [new-name] [--suffix TEXT] [-p ID] [-y] [--no-wait]` | target omitted means interactive list; new name omitted means prompt (re-asks on invalid input) | Renames VMs. Each `*` in the new name receives, from left to right, the part matched by a variable part (`{range}`, `?`, `*`) of the target pattern (`rename 'node-{0-3}-*' 'gpu-*-*'`); for a plain name or VM ID, `*` is the whole current name. `--suffix` appends to current names. Always shows old → new and asks for confirmation unless `-y`. |
 
 Bulk lifecycle operations run in chunks of 30 and refresh the token before each chunk. Parallel action progress is displayed.
 
@@ -309,17 +317,20 @@ Commands live under `mdx network acl`.
 | Command | Arguments/options | Behavior |
 |---|---|---|
 | `list [segment-id] [-p ID] [--json]` | segment optional | Resolve segment and list ACLs. |
-| `add [segment-id] [-p ID] [--json]` | interactive | Select protocol `TCP`/`UDP`/`ICMP`, source address/mask/port, destination address/mask/port, confirm, create ACL. |
-| `edit [acl-id] [--segment-id ID] [-p ID] [--json]` | interactive | Resolve segment, find ACL, edit current values, confirm, update ACL. |
+| `add [segment-id] [-p ID]` | interactive | Select protocol `TCP`/`UDP`/`ICMP`, source address/mask/port, destination address/mask/port, confirm, send the create request. |
+| `edit [acl-id] [--segment-id ID] [-p ID]` | interactive | Resolve segment, find ACL, edit current values, confirm, send the update request. |
 | `delete [acl-id] [--segment-id ID] [-p ID] [-y]` | interactive unless ID and `-y` | Delete ACL rule. |
 
 Defaults for ACL add:
 
 - Source address: `0.0.0.0`
-- Source mask: `0.0.0.0`
+- Source mask: `0`
 - Source port: `Any` for TCP/UDP; omitted for ICMP
-- Destination mask: `255.255.255.255`
+- Destination mask: `32`
 - Destination port: `Any` for TCP/UDP; omitted for ICMP
+
+Masks are prefix lengths (`0`-`32`); the API rejects dotted masks such as `255.255.255.255` with 400.
+`add` and `edit` print only that the request was accepted. MDX applies the rule asynchronously as a task, so confirm with `mdx network acl list` or `mdx task list`.
 
 ## Templates
 

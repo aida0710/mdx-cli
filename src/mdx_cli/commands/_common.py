@@ -8,6 +8,7 @@ import typer
 
 from mdx_cli.api.auth import refresh_saved_token, token_needs_refresh
 from mdx_cli.api.client import create_client
+from mdx_cli.commands._prompt_steps import ask
 from mdx_cli.console import console, err_console
 from mdx_cli.credentials.store import get_store
 from mdx_cli.settings import get_settings
@@ -100,7 +101,7 @@ def prompt_int(
 ) -> int:
     """番号入力。非数値・0以下・範囲外はリトライする。"""
     while True:
-        raw = questionary.text(label, default=default or "").unsafe_ask()
+        raw = ask(questionary.text(label, default=default or ""))
         try:
             val = int(raw)
         except ValueError:

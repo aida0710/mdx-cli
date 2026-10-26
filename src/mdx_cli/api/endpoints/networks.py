@@ -33,18 +33,18 @@ def list_dnats(client: httpx.Client, project_id: str) -> list[DNAT]:
     return [DNAT.model_validate(item) for item in items]
 
 
-def create_acl(client: httpx.Client, request: ACLCreateRequest) -> ACL:
+# 作成・更新の応答は uuid を含まずマスクが整数で返り、一覧の ACL と形が違うので読まない。
+# 反映は MDX 側のタスクとして非同期に行われる。
+def create_acl(client: httpx.Client, request: ACLCreateRequest) -> None:
     resp = client.post("/api/acl/", json=request.model_dump())
     resp.raise_for_status()
-    return ACL.model_validate(resp.json())
 
 
 def update_acl(
     client: httpx.Client, acl_id: str, request: ACLUpdateRequest
-) -> ACL:
+) -> None:
     resp = client.put(f"/api/acl/{acl_id}/", json=request.model_dump())
     resp.raise_for_status()
-    return ACL.model_validate(resp.json())
 
 
 def delete_acl(client: httpx.Client, acl_id: str) -> None:
