@@ -14,8 +14,9 @@ from mdx_cli.commands._common import (
     resolve_segment_id,
     select_or_exit,
 )
+from mdx_cli.commands._prompt_steps import Step, ask, confirm_or_edit, run_steps
 from mdx_cli.console import console
-from mdx_cli.models.network import ACL, ACLCreateRequest, ACLUpdateRequest
+from mdx_cli.models.network import ACLCreateRequest, ACLUpdateRequest
 from mdx_cli.output.formatting import render
 from mdx_cli.output.tables import ACL_COLUMNS
 
@@ -41,52 +42,55 @@ def _validate_prefix_length(text: str) -> bool | str:
     return f"0〜{_MAX_PREFIX_LENGTH}のプレフィックス長で入力してください（例: 32）"
 
 
-def _prompt_acl_fields(selected: ACL | None = None) -> dict:
-    """ACLルールの各フィールドを対話入力する（add / edit 共通）。
+# 新規追加の初期値。送信元はどこからでも、宛先は1台（/32）
+_NEW_ACL_FIELDS = {
+    "protocol": "TCP",
+    "src_address": "0.0.0.0",
+    "src_mask": "0",
+    "src_port": "Any",
+    "dst_address": "",
+    "dst_mask": "32",
+    "dst_port": "Any",
+}
 
-    selected があればその現在値を、なければ新規追加用の初期値をデフォルトにする。
-    ICMP はポート概念がないためポート入力をスキップする。
+
+def _acl_field_steps(fields: dict) -> list[Step]:
+    """ACLルールの各項目を聞く手順（add / edit 共通）。fields の今の値を初期値にし、答えで上書きする。
+
+    ICMP はポートの概念がないのでポートを聞かない。
     """
-    protocol = questionary.select(
-        "プロトコル:",
-        choices=["TCP", "UDP", "ICMP"],
-        default=selected.protocol if selected else None,
-    ).unsafe_ask()
-    src_address = questionary.text(
-        "送信元アドレス:", default=selected.src_address if selected else "0.0.0.0"
-    ).unsafe_ask()
-    src_mask = questionary.text(
-        "送信元マスク（プレフィックス長）:",
-        default=selected.src_mask if selected else "0",
-        validate=_validate_prefix_length,
-    ).unsafe_ask()
-    src_port = selected.src_port if selected else "Any"
-    if protocol != "ICMP":
-        src_port = questionary.text(
-            "送信元ポート:", default=selected.src_port if selected else "Any"
-        ).unsafe_ask()
-    dst_address = questionary.text(
-        "宛先アドレス:", default=selected.dst_address if selected else ""
-    ).unsafe_ask()
-    dst_mask = questionary.text(
-        "宛先マスク（プレフィックス長）:",
-        default=selected.dst_mask if selected else "32",
-        validate=_validate_prefix_length,
-    ).unsafe_ask()
-    dst_port = selected.dst_port if selected else "Any"
-    if protocol != "ICMP":
-        dst_port = questionary.text(
-            "宛先ポート:", default=selected.dst_port if selected else "Any"
-        ).unsafe_ask()
-    return {
-        "protocol": protocol,
-        "src_address": src_address,
-        "src_mask": src_mask,
-        "src_port": src_port,
-        "dst_address": dst_address,
-        "dst_mask": dst_mask,
-        "dst_port": dst_port,
-    }
+    def ask_protocol() -> None:
+        fields["protocol"] = ask(questionary.select(
+            "プロトコル:", choices=["TCP", "UDP", "ICMP"], default=fields["protocol"]
+        ))
+
+    def ask_text(key: str, label: str, validate=None):
+        def _ask() -> None:
+            fields[key] = ask(questionary.text(label, default=fields[key], validate=validate))
+        return _ask
+
+    def has_ports() -> bool:
+        return fields["protocol"] != "ICMP"
+
+    return [
+        Step("プロトコル", ask_protocol),
+        Step("送信元アドレス", ask_text("src_address", "送信元アドレス:")),
+        Step("送信元マスク", ask_text("src_mask", "送信元マスク（プレフィックス長）:", _validate_prefix_length)),
+        Step("送信元ポート", ask_text("src_port", "送信元ポート:"), is_needed=has_ports),
+        Step("宛先アドレス", ask_text("dst_address", "宛先アドレス:")),
+        Step("宛先マスク", ask_text("dst_mask", "宛先マスク（プレフィックス長）:", _validate_prefix_length)),
+        Step("宛先ポート", ask_text("dst_port", "宛先ポート:"), is_needed=has_ports),
+    ]
+
+
+def _ask_acl_fields(fields: dict, header: str, message: str) -> dict:
+    """各項目を聞き、内容を見せて「実行／直す／中止」を確認する。送る値を返す。"""
+    steps = _acl_field_steps(fields)
+    run_steps(steps)
+    confirm_or_edit(steps, print_summary=lambda: _print_acl_summary(header, fields), message=message)
+    if fields["protocol"] == "ICMP":
+        return {**fields, "src_port": "Any", "dst_port": "Any"}
+    return dict(fields)
 
 
 def _print_acl_summary(header: str, fields: dict) -> None:
@@ -94,7 +98,6 @@ def _print_acl_summary(header: str, fields: dict) -> None:
     console.print(f"  プロトコル: {fields['protocol']}")
     console.print(f"  送信元:     {fields['src_address']}/{fields['src_mask']} :{fields['src_port']}")
     console.print(f"  宛先:       {fields['dst_address']}/{fields['dst_mask']} :{fields['dst_port']}")
-
 
 
 @app.command("list")
@@ -119,12 +122,8 @@ def acl_add(
     client = get_client()
     seg_id = resolve_segment_id(client, segment_id, project_id)
 
-    console.print("\n[bold]ACLルール追加[/bold]")
-    fields = _prompt_acl_fields()
-    _print_acl_summary("確認:", fields)
-
-    if not questionary.confirm("\n追加しますか？").unsafe_ask():
-        raise typer.Abort()
+    console.print("\n[bold]ACLルール追加[/bold] [dim]（Esc で前の項目へ戻る）[/dim]")
+    fields = _ask_acl_fields(dict(_NEW_ACL_FIELDS), header="確認:", message="追加しますか？")
 
     req = ACLCreateRequest(**fields, segment=seg_id)
     create_acl(client, req)
@@ -157,12 +156,9 @@ def acl_edit(
         selected = find_by_uuid(acls, acl_id, label="ACL")
 
     # 現在値を表示して編集
-    console.print("\n[bold]現在の値（Enterでそのまま）:[/bold]")
-    fields = _prompt_acl_fields(selected)
-    _print_acl_summary("変更後:", fields)
-
-    if not questionary.confirm("\n更新しますか？").unsafe_ask():
-        raise typer.Abort()
+    console.print("\n[bold]現在の値（Enterでそのまま、Esc で前の項目へ戻る）:[/bold]")
+    current_fields = {key: getattr(selected, key) for key in _NEW_ACL_FIELDS}
+    fields = _ask_acl_fields(current_fields, header="変更後:", message="更新しますか？")
 
     req = ACLUpdateRequest(**fields)
     update_acl(client, acl_id, req)

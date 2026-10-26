@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import questionary
-from questionary import Choice
 import typer
 
 from mdx_cli.api.endpoints.networks import list_segments
@@ -35,16 +34,22 @@ from mdx_cli.commands._common import (
     select_from_list,
 )
 from mdx_cli.commands._deploy_plan import DeployPlan
+from mdx_cli.commands._deploy_steps import (
+    DeployAnswers,
+    DeployOptions,
+    build_deploy_steps,
+    check_pack_num,
+    print_deploy_summary,
+)
+from mdx_cli.commands._prompt_steps import confirm_or_edit, run_steps
 from mdx_cli.commands._name_pattern import (
-    expand_name_pattern,
-    expand_name_pattern_for_deploy,
     count_wildcards,
     is_name_pattern,
     match_names,
     rename_by_wildcards,
 )
 from mdx_cli.console import console
-from mdx_cli.models.pack import PACK_SPECS, pack_choice_label
+from mdx_cli.models.pack import PACK_SPECS
 from mdx_cli.models.vm import VMResource
 from mdx_cli.output.formatting import render, render_json
 from mdx_cli.output.tables import VM_COLUMNS, VM_RESOURCE_COLUMNS
@@ -182,29 +187,6 @@ def _print_vm_detail(vm) -> None:
     console.print()
 
 
-def _list_pubkeys() -> list[Path]:
-    """~/.ssh にある公開鍵(.pub)の一覧を返す。標準的な鍵名を優先して並べる。"""
-    ssh_dir = Path.home() / ".ssh"
-    if not ssh_dir.is_dir():
-        return []
-    priority = {"id_ed25519.pub": 0, "id_rsa.pub": 1, "id_ecdsa.pub": 2}
-    return sorted(
-        ssh_dir.glob("*.pub"),
-        key=lambda p: (priority.get(p.name, 99), p.name),
-    )
-
-
-def _pubkey_preview(path: Path) -> str:
-    """公開鍵ファイル内容のプレビュー（先頭30文字...末尾30文字）。"""
-    try:
-        content = path.read_text().strip()
-    except OSError:
-        return "(読み取り不可)"
-    if len(content) <= 63:
-        return content
-    return f"{content[:30]}...{content[-30:]}"
-
-
 @app.command()
 def deploy(
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID（省略時は選択済みを使用）", envvar="MDX_PROJECT_ID"),
@@ -226,179 +208,34 @@ def deploy(
     """
     pid = resolve_project_id(project_id)
     client = get_client()
-
-    selected_tmpl = _resolve_template(client, pid, template)
-    segment_uuid = _resolve_segment_for_deploy(client, pid, skip_prompt=yes)
-    shared_key = _resolve_ssh_key(key)
-    name_pattern = _resolve_name_pattern(name)
-    pack_type = _resolve_pack_type(pack_type_opt)
-    spec = PACK_SPECS[pack_type]
-
-    if pack_num_opt is not None:
-        if not 1 <= pack_num_opt <= spec.max_num:
-            fail(f"パック数は 1〜{spec.max_num} の範囲で指定してください")
-        pack_num = pack_num_opt
-    else:
-        pack_num = prompt_int(
-            f"パック数 (最大{spec.max_num}):",
-            max_val=spec.max_num,
-            default=str(spec.default_num),
-        )
-
-    if disk is not None:
-        disk_size = disk
-    else:
-        disk_size = prompt_int(
-            "ディスクサイズ(GB):", default=str(selected_tmpl.lower_limit_disk)
-        )
-
-    service_level = _resolve_service_level(service_level_opt)
-
-    if not power_on and not yes:
-        power_on = questionary.confirm("デプロイ後に自動起動しますか？", default=False).unsafe_ask()
-
-    plan = DeployPlan(
-        template=selected_tmpl,
-        segment_uuid=segment_uuid,
-        name_pattern=name_pattern,
-        disk_size=disk_size,
-        pack_type=pack_type,
-        pack_num=pack_num,
-        service_level=service_level,
-        shared_key=shared_key,
-        power_on=power_on,
-    )
-
-    _print_deploy_summary(plan)
-    if not yes:
-        if not questionary.confirm("\nデプロイしますか？").unsafe_ask():
-            raise typer.Abort()
-
-    _execute_deploy(client, plan, pid, no_wait=no_wait)
-
-
-def _resolve_template(client, pid: str, template: str | None):
-    """テンプレートを解決する。指定があれば部分一致、なければ一覧から選択。"""
     templates = list_templates(client, pid)
-    stop_active_spinner()
-
-    if template:
-        matched = [t for t in templates if template.lower() in t.name.lower()]
-        if not matched:
-            fail(f"テンプレート '{template}' が見つかりません")
-        return matched[0]
-
-    if not templates:
-        fail("テンプレートがありません")
-
-    def _format(t) -> str:
-        os_info = f" [cyan]{t.os_name or ''} {t.os_version or ''}[/cyan]" if t.os_name else ""
-        gpu = " [red]GPU必須[/red]" if t.gpu_required else ""
-        line = f"{t.name}{os_info}{gpu} [dim]disk≥{t.lower_limit_disk}GB[/dim]"
-        if t.description:
-            line += f"\n     [dim]{t.description}[/dim]"
-        return line
-
-    return select_from_list(templates, _format, title="テンプレート:")
-
-
-def _resolve_segment_for_deploy(client, pid: str, skip_prompt: bool) -> str:
-    """デプロイ先セグメントを解決する。複数あれば選択（-y 時は先頭）。"""
     segments = list_segments(client, pid)
     stop_active_spinner()
-    if not segments:
-        fail("セグメントがありません")
-    if len(segments) == 1 or skip_prompt:
-        return segments[0].uuid
-    return select_from_list(segments, lambda s: s.name, title="セグメント:").uuid
 
+    options = DeployOptions(
+        template=template,
+        name=name,
+        pack_type=pack_type_opt,
+        pack_num=pack_num_opt,
+        disk=disk,
+        service_level=service_level_opt,
+        key=key,
+        power_on=power_on,
+        yes=yes,
+    )
+    answers = DeployAnswers()
+    steps = build_deploy_steps(options, answers, templates=templates, segments=segments)
+    if steps:
+        console.print("[dim]Esc で前の項目へ戻れます[/dim]")
+    run_steps(steps)
+    check_pack_num(answers)
 
-def _resolve_ssh_key(key: str | None) -> str:
-    """SSH公開鍵の内容を解決する。未指定なら ~/.ssh の一覧から選択。"""
-    if key:
-        key_path = Path(key).expanduser()
+    if yes:
+        print_deploy_summary(answers)
     else:
-        console.print("\n[bold]SSH公開鍵[/bold]")
-        pubkeys = _list_pubkeys()
-        if pubkeys:
-            console.print("[dim]  ~/.ssh/ にある公開鍵:[/dim]")
-            for i, p in enumerate(pubkeys, 1):
-                console.print(f"  {i}) {p.name}")
-                console.print(f"     [grey50]{_pubkey_preview(p)}[/grey50]")
-            console.print("[dim]  番号で選択、または絶対パス/~/... を直接入力[/dim]")
-            answer = questionary.text("番号またはパス:", default="1").unsafe_ask()
-            if answer.strip().isdigit() and 1 <= int(answer) <= len(pubkeys):
-                key_path = pubkeys[int(answer) - 1]
-                console.print(f"[green]{key_path.name} が選択されました[/green]")
-            else:
-                key_path = Path(answer).expanduser()
-        else:
-            console.print("[yellow]  警告: ~/.ssh/ に .pub ファイルが見つかりません[/yellow]")
-            console.print("[dim]  絶対パスまたは ~/... で公開鍵のパスを指定してください[/dim]")
-            answer = questionary.text("パス:").unsafe_ask()
-            key_path = Path(answer).expanduser()
-    if not key_path.is_absolute():
-        fail("絶対パスまたは ~/... で指定してください")
-    if not key_path.exists():
-        fail(f"ファイルが見つかりません: {key_path}")
-    return key_path.read_text().strip()
+        confirm_or_edit(steps, print_summary=lambda: print_deploy_summary(answers), message="デプロイしますか？")
 
-
-def _resolve_name_pattern(name: str | None) -> str:
-    """VM名パターンを解決し、複数台のときは展開結果の概要を表示する。"""
-    if name:
-        pattern = name
-    else:
-        console.print("\n[bold]VM名[/bold]")
-        console.print("[dim]  パターンで一括作成: my-vm-{0-9} → 10台 (1リクエスト), name-{a-c}-{0-9} → 30台 (3リクエスト)[/dim]")
-        pattern = questionary.text("VM名:").unsafe_ask()
-
-    vm_names = expand_name_pattern(pattern)
-    deploy_patterns = expand_name_pattern_for_deploy(pattern)
-    if len(vm_names) > 1:
-        if len(deploy_patterns) < len(vm_names):
-            console.print(
-                f"  → {len(vm_names)}台 ({len(deploy_patterns)} リクエストにバッチ集約): "
-                f"{vm_names[0]} 〜 {vm_names[-1]}"
-            )
-        else:
-            console.print(f"  → {len(vm_names)}台: {vm_names[0]} 〜 {vm_names[-1]}")
-    return pattern
-
-
-def _resolve_pack_type(pack_type_opt: str | None) -> str:
-    if pack_type_opt:
-        if pack_type_opt not in PACK_SPECS:
-            fail(f"不明なパックタイプです: {pack_type_opt}（cpu / gpu）")
-        return pack_type_opt
-    return questionary.select(
-        "パックタイプ:",
-        choices=[Choice(pack_choice_label(pt), value=pt) for pt in PACK_SPECS],
-    ).unsafe_ask()
-
-
-def _resolve_service_level(service_level_opt: str | None) -> str:
-    if service_level_opt:
-        return service_level_opt
-    return questionary.select(
-        "サービスレベル:",
-        choices=[
-            Choice("spot（低価格・中断あり）", value="spot"),
-            Choice("guarantee（高価格・中断なし）", value="guarantee"),
-        ],
-    ).unsafe_ask()
-
-
-def _print_deploy_summary(plan: DeployPlan) -> None:
-    vm_names = plan.vm_names
-    console.print("\n[bold]デプロイ内容:[/bold]")
-    console.print(f"  テンプレート: {plan.template.name}")
-    console.print(f"  ディスク:     {plan.disk_size}GB / {plan.pack_type} x {plan.pack_num} / {plan.service_level}")
-    console.print(f"  自動起動:     {'あり' if plan.power_on else 'なし'}")
-    if len(vm_names) == 1:
-        console.print(f"  VM名:         {vm_names[0]}")
-    else:
-        console.print(f"  VM数:         {len(vm_names)}台 ({vm_names[0]} 〜 {vm_names[-1]})")
+    _execute_deploy(client, answers.to_plan(), pid, no_wait=no_wait)
 
 
 def _execute_deploy(client, plan: DeployPlan, pid: str, no_wait: bool) -> None:

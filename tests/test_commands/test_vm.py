@@ -1,10 +1,11 @@
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
-from mdx_cli.commands.vm import _list_pubkeys, _pubkey_preview, app
+from mdx_cli.commands._deploy_steps import list_pubkeys, pubkey_preview
+from mdx_cli.commands.vm import app
 from mdx_cli.models.network import Segment
 from mdx_cli.models.template import Template
 from mdx_cli.models.vm import VM, VMDeployResponse
@@ -659,7 +660,7 @@ def test_list_pubkeys_orders_standard_keys_first(tmp_path):
     (ssh_dir / "config").write_text("config")
 
     with patch.object(Path, "home", return_value=tmp_path):
-        result = _list_pubkeys()
+        result = list_pubkeys()
 
     assert [p.name for p in result] == [
         "id_ed25519.pub",
@@ -672,7 +673,7 @@ def test_list_pubkeys_orders_standard_keys_first(tmp_path):
 def test_list_pubkeys_returns_empty_when_no_ssh_dir(tmp_path):
     """~/.ssh が無ければ空リストを返す。"""
     with patch.object(Path, "home", return_value=tmp_path):
-        assert _list_pubkeys() == []
+        assert list_pubkeys() == []
 
 
 
@@ -685,14 +686,14 @@ def test_pubkey_preview_abbreviates_long_content(tmp_path):
         "user@example.com"
     )
     f.write_text(content + "\n")
-    assert _pubkey_preview(f) == f"{content[:30]}...{content[-30:]}"
+    assert pubkey_preview(f) == f"{content[:30]}...{content[-30:]}"
 
 
 def test_pubkey_preview_short_content_shown_as_is(tmp_path):
     """短い内容（63文字以下）はそのまま返す。"""
     f = tmp_path / "k.pub"
     f.write_text("ssh-rsa SHORT")
-    assert _pubkey_preview(f) == "ssh-rsa SHORT"
+    assert pubkey_preview(f) == "ssh-rsa SHORT"
 
 
 def _deploy_common_args(key_omitted=True):
@@ -737,8 +738,8 @@ def test_vm_deploy_interactive_lists_pubkeys_and_selects_by_number(tmp_path):
             with patch("mdx_cli.commands.vm.deploy_vm", side_effect=mock_deploy):
                 with patch("mdx_cli.commands.vm.get_client"):
                     with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
-                        with patch("mdx_cli.commands.vm._list_pubkeys", return_value=keys):
-                            with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                        with patch("mdx_cli.commands._deploy_steps.list_pubkeys", return_value=keys):
+                            with patch("mdx_cli.commands._deploy_steps.questionary") as mock_q:
                                 mock_q.text.return_value.unsafe_ask.return_value = "3"
                                 result = runner.invoke(app, _deploy_common_args())
 
@@ -767,8 +768,8 @@ def test_vm_deploy_interactive_warns_when_no_pubkey(tmp_path):
             with patch("mdx_cli.commands.vm.deploy_vm", side_effect=mock_deploy):
                 with patch("mdx_cli.commands.vm.get_client"):
                     with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
-                        with patch("mdx_cli.commands.vm._list_pubkeys", return_value=[]):
-                            with patch("mdx_cli.commands.vm.questionary") as mock_q:
+                        with patch("mdx_cli.commands._deploy_steps.list_pubkeys", return_value=[]):
+                            with patch("mdx_cli.commands._deploy_steps.questionary") as mock_q:
                                 mock_q.text.return_value.unsafe_ask.return_value = str(key_file)
                                 result = runner.invoke(app, _deploy_common_args())
 
@@ -1245,3 +1246,83 @@ def test_vm_resources_prints_grand_total():
     assert result.exit_code == 0, result.output
     assert "2台" in result.output
     assert "140 GB" in result.output
+
+
+def _scripted_text(answers: list, defaults: list):
+    """questionary.text の代わり。answers を順に返す（None は Enter で初期値のまま）。初期値を defaults に記録する。"""
+    remaining = iter(answers)
+
+    def _text(label, default="", **kwargs):
+        defaults.append(default)
+        answer = next(remaining)
+        question = MagicMock()
+        question.unsafe_ask.return_value = default if answer is None else answer
+        return question
+
+    return _text
+
+
+def test_vm_deploy_interactive_reasks_bad_key_and_edits_pack_type(tmp_path):
+    """鍵のパスが無ければ聞き直す。確認で「直す」→パックタイプを gpu にすると、パック数は gpu の範囲で聞き直す"""
+    key_file = tmp_path / "id.pub"
+    key_file.write_text("ssh-ed25519 AAAAKEY")
+    captured_requests: list = []
+
+    def mock_deploy(client, req):
+        captured_requests.append(req)
+        return VMDeployResponse(task_id=["task-0"])
+
+    step_defaults: list = []
+    number_defaults: list = []
+    with patch("mdx_cli.commands.vm.list_templates", return_value=[_make_template()]):
+        with patch("mdx_cli.commands.vm.list_segments", return_value=[_make_segment()]):
+            with patch("mdx_cli.commands.vm.deploy_vm", side_effect=mock_deploy):
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands._deploy_steps.list_pubkeys", return_value=[]):
+                            with patch("mdx_cli.commands._deploy_steps.questionary") as mock_q:
+                                mock_q.text.side_effect = _scripted_text(
+                                    [str(tmp_path / "missing.pub"), str(key_file), "vm-1"], step_defaults
+                                )
+                                mock_q.select.return_value.unsafe_ask.side_effect = ["cpu", "spot", "gpu", "spot"]
+                                mock_q.confirm.return_value.unsafe_ask.return_value = False
+                                with patch("mdx_cli.commands._common.questionary") as mock_common_q:
+                                    mock_common_q.text.side_effect = _scripted_text(
+                                        ["100", "40", None, None], number_defaults
+                                    )
+                                    with patch("mdx_cli.commands._prompt_steps.questionary") as mock_steps_q:
+                                        # 項目の並び: SSH公開鍵, VM名, パックタイプ, ...
+                                        mock_steps_q.select.return_value.unsafe_ask.side_effect = [
+                                            "edit", 2, "execute",
+                                        ]
+                                        result = runner.invoke(app, ["deploy", "-t", "Ubuntu", "--no-wait"])
+
+    assert result.exit_code == 0, result.output
+    assert "ファイルが見つかりません" in result.output
+    # 2回目の鍵の入力は、前に入れた（見つからなかった）パスを初期値にする
+    assert step_defaults[1] == str(tmp_path / "missing.pub")
+    # gpu の上限は 8 なので、前の 100 ではなく gpu の既定値を初期値にする
+    assert number_defaults[2] == "1"
+    request = captured_requests[0]
+    assert (request.pack_type, request.pack_num, request.disk_size) == ("gpu", 1, 40)
+
+
+def test_vm_deploy_rejects_pack_num_option_over_limit_of_chosen_type(tmp_path):
+    """引数のパック数が、対話で選んだパックタイプの上限を超えたら終了する"""
+    key_file = tmp_path / "id.pub"
+    key_file.write_text("ssh-ed25519 AAAAKEY")
+    with patch("mdx_cli.commands.vm.list_templates", return_value=[_make_template()]):
+        with patch("mdx_cli.commands.vm.list_segments", return_value=[_make_segment()]):
+            with patch("mdx_cli.commands.vm.deploy_vm") as mock_deploy:
+                with patch("mdx_cli.commands.vm.get_client"):
+                    with patch("mdx_cli.commands.vm.resolve_project_id", return_value="proj-1"):
+                        with patch("mdx_cli.commands._deploy_steps.questionary") as mock_q:
+                            mock_q.select.return_value.unsafe_ask.return_value = "gpu"
+                            result = runner.invoke(app, [
+                                "deploy", "-t", "Ubuntu", "-n", "vm-1", "--pack-num", "20",
+                                "--disk", "40", "--service-level", "spot", "-k", str(key_file), "-y",
+                            ])
+
+    assert result.exit_code == 1
+    assert "1〜8" in result.output
+    mock_deploy.assert_not_called()
