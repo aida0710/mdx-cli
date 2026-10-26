@@ -87,8 +87,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev
 
+      # typer はシェル補完の導入時に shellingham.posix / shellingham.nt を実行時に import する。
+      # PyInstaller の静的解析では見つからず、同梱しないと --install-completion が落ちる。
       - name: Build application bundle
-        run: uv run pyinstaller --onedir --name mdx src/mdx_cli/main.py
+        run: uv run pyinstaller --onedir --name mdx --collect-submodules shellingham src/mdx_cli/main.py
 
       - name: Package application bundle
         run: uv run --no-sync python scripts/package_release.py ${{ matrix.artifact }}
