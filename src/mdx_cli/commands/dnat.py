@@ -106,7 +106,7 @@ def _list_segments_or_fail(client, pid: str) -> list:
 def dnat_add(
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
 ) -> None:
-    """DNATルール追加（対話式。Esc で前の項目へ戻る）"""
+    """DNATルール追加（対話式）"""
     pid = resolve_project_id(project_id)
     client = get_client()
 
@@ -130,7 +130,7 @@ def dnat_edit(
     dnat_id: str = typer.Argument(None, help="DNAT ID（省略時は一覧から選択）"),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
 ) -> None:
-    """DNATルール編集（対話式。Esc で前の項目へ戻る）"""
+    """DNATルール編集（対話式）"""
     pid = resolve_project_id(project_id)
     client = get_client()
 

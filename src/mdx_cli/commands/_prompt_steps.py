@@ -60,6 +60,8 @@ def ask(question):
 
 def run_steps(steps: Sequence[Step], start: int = 0) -> None:
     """start 番目から最後まで順に聞く。Esc なら1つ前の（聞く必要のある）項目へ戻る。"""
+    if start == 0 and sum(1 for step in steps if step.is_needed()) > 1:
+        console.print("[dim]Esc で前の項目へ戻れます[/dim]")
     token = _back_enabled.set(True)
     try:
         index = start

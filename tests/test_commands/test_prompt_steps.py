@@ -162,3 +162,12 @@ def test_confirm_or_edit_lists_only_needed_steps():
 
     edit_choices = mock_q.select.call_args_list[1].kwargs["choices"]
     assert [choice.title for choice in edit_choices] == ["一つ目"]
+
+
+def test_run_steps_shows_escape_hint_once_when_several_steps(capsys):
+    """聞く項目が2つ以上なら、最初に1度だけ Esc の案内を出す"""
+    run_steps([Step("一つ目", lambda: None), Step("二つ目", lambda: None)])
+    run_steps([Step("一つ目", lambda: None), Step("二つ目", lambda: None)], start=1)
+    run_steps([Step("一つ目", lambda: None), Step("二つ目", lambda: None, is_needed=lambda: False)])
+
+    assert capsys.readouterr().out.count("Esc で前の項目へ戻れます") == 1
