@@ -164,6 +164,11 @@ render(data, VM_COLUMNS, json_mode=json)  # --json ならJSON、なければRich
 - トークン期限切れ: 自動refresh → 失敗時は保存済みID/PWで再ログイン（OTPだけプロンプト）
 - `auth logout` で全クレデンシャル削除
 
+## タブ補完
+
+Tab のたびに起動される補完は、本体を読み込まず `completion_tree_data.py` に保存したコマンド構造で答える（入口は `entry.py`）。
+コマンド・オプション・ヘルプを変えたら `uv run python -m mdx_cli.completion_tree` で作り直す。忘れると `tests/test_completion_tree.py` が落ちる。
+
 ## テスト
 
 - questionary の入力はモックする（パイプ入力非対応）
