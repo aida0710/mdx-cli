@@ -101,19 +101,20 @@ def test_list_dnats():
 
 
 @respx.mock
-def test_create_acl():
-    respx.post("/api/acl/").mock(
+def test_create_acl_accepts_response_without_uuid():
+    """作成の応答は uuid を含まずマスクが整数で返るが、作成は成功として扱う"""
+    route = respx.post("/api/acl/").mock(
         return_value=httpx.Response(
             201,
             json={
-                "uuid": "acl-new",
                 "protocol": "TCP",
                 "src_address": "0.0.0.0",
-                "src_mask": "0",
+                "src_mask": 0,
                 "src_port": "Any",
                 "dst_address": "10.0.0.1",
-                "dst_mask": "32",
+                "dst_mask": 32,
                 "dst_port": "22",
+                "segment": "seg-1",
             },
         )
     )
@@ -128,24 +129,23 @@ def test_create_acl():
         dst_port="22",
         segment="seg-1",
     )
-    acl = create_acl(client, req)
-    assert acl.uuid == "acl-new"
-    assert acl.protocol == "TCP"
+    create_acl(client, req)
+    assert route.called
 
 
 @respx.mock
-def test_update_acl():
-    respx.put("/api/acl/acl-1/").mock(
+def test_update_acl_accepts_response_without_uuid():
+    """更新の応答も作成と同じく uuid の有無やマスクの型に依存しない"""
+    route = respx.put("/api/acl/acl-1/").mock(
         return_value=httpx.Response(
             200,
             json={
-                "uuid": "acl-1",
                 "protocol": "UDP",
                 "src_address": "0.0.0.0",
-                "src_mask": "0",
+                "src_mask": 0,
                 "src_port": "Any",
                 "dst_address": "10.0.0.1",
-                "dst_mask": "32",
+                "dst_mask": 32,
                 "dst_port": "80",
             },
         )
@@ -160,9 +160,8 @@ def test_update_acl():
         dst_mask="32",
         dst_port="80",
     )
-    acl = update_acl(client, "acl-1", req)
-    assert acl.uuid == "acl-1"
-    assert acl.protocol == "UDP"
+    update_acl(client, "acl-1", req)
+    assert route.called
 
 
 @respx.mock
