@@ -34,23 +34,23 @@ def test_prompt_acl_fields_add_mode_defaults():
     with patch("mdx_cli.commands.acl.questionary") as mock_q:
         mock_q.select.return_value.unsafe_ask.return_value = "TCP"
         mock_q.text.return_value.unsafe_ask.side_effect = [
-            "0.0.0.0", "0.0.0.0", "Any",  # src
-            "10.0.0.1", "255.255.255.255", "22",  # dst
+            "0.0.0.0", "0", "Any",  # src
+            "10.0.0.1", "32", "22",  # dst
         ]
         fields = _prompt_acl_fields()
 
     assert fields == {
         "protocol": "TCP",
         "src_address": "0.0.0.0",
-        "src_mask": "0.0.0.0",
+        "src_mask": "0",
         "src_port": "Any",
         "dst_address": "10.0.0.1",
-        "dst_mask": "255.255.255.255",
+        "dst_mask": "32",
         "dst_port": "22",
     }
-    # 新規追加時のデフォルト値
+    # 新規追加時のデフォルト値。API はマスクをプレフィックス長で受け取る
     text_defaults = [c.kwargs.get("default") for c in mock_q.text.call_args_list]
-    assert text_defaults == ["0.0.0.0", "0.0.0.0", "Any", "", "255.255.255.255", "Any"]
+    assert text_defaults == ["0.0.0.0", "0", "Any", "", "32", "Any"]
 
 
 def test_prompt_acl_fields_edit_mode_uses_current_values_as_defaults():
@@ -80,14 +80,42 @@ def test_prompt_acl_fields_icmp_skips_port_prompts():
     with patch("mdx_cli.commands.acl.questionary") as mock_q:
         mock_q.select.return_value.unsafe_ask.return_value = "ICMP"
         mock_q.text.return_value.unsafe_ask.side_effect = [
-            "0.0.0.0", "0.0.0.0",  # src（ポートなし）
-            "10.0.0.1", "255.255.255.255",  # dst（ポートなし）
+            "0.0.0.0", "0",  # src（ポートなし）
+            "10.0.0.1", "32",  # dst（ポートなし）
         ]
         fields = _prompt_acl_fields()
 
     assert fields["src_port"] == "Any"
     assert fields["dst_port"] == "Any"
     assert mock_q.text.return_value.unsafe_ask.call_count == 4
+
+
+def test_validate_prefix_length_accepts_only_0_to_32():
+    """マスクはプレフィックス長（0〜32 の整数）だけを受け付け、ドット表記は理由を返す"""
+    from mdx_cli.commands.acl import _validate_prefix_length
+
+    assert _validate_prefix_length("0") is True
+    assert _validate_prefix_length("32") is True
+    assert isinstance(_validate_prefix_length("33"), str)
+    assert isinstance(_validate_prefix_length("255.255.255.255"), str)
+    assert isinstance(_validate_prefix_length(""), str)
+
+
+def test_prompt_acl_fields_validates_mask_prompts():
+    """マスクの入力欄にだけプレフィックス長の検証を付ける"""
+    from mdx_cli.commands.acl import _prompt_acl_fields, _validate_prefix_length
+
+    with patch("mdx_cli.commands.acl.questionary") as mock_q:
+        mock_q.select.return_value.unsafe_ask.return_value = "TCP"
+        mock_q.text.return_value.unsafe_ask.side_effect = [
+            "0.0.0.0", "0", "Any", "10.0.0.1", "32", "22",
+        ]
+        _prompt_acl_fields()
+
+    validators = [c.kwargs.get("validate") for c in mock_q.text.call_args_list]
+    assert validators == [
+        None, _validate_prefix_length, None, None, _validate_prefix_length, None,
+    ]
 
 
 def test_acl_list_json():
@@ -101,27 +129,39 @@ def test_acl_list_json():
             assert data[0]["protocol"] == "TCP"
 
 
-def test_acl_add_interactive():
-    acl = _make_acl(uuid="acl-new")
-    with patch("mdx_cli.commands.acl.create_acl", return_value=acl) as mock_create:
+def test_acl_add_sends_request_and_reports_acceptance():
+    """入力どおりの作成リクエストを送り、応答を読まずに受付を表示する"""
+    with patch("mdx_cli.commands.acl.create_acl") as mock_create:
         with patch("mdx_cli.commands.acl.get_client"):
             with patch("mdx_cli.commands.acl.questionary") as mock_q:
                 mock_q.select.return_value.unsafe_ask.return_value = "TCP"
                 mock_q.text.return_value.unsafe_ask.side_effect = [
-                    "0.0.0.0", "0.0.0.0", "Any",  # src
-                    "10.0.0.1", "255.255.255.255", "22",  # dst
+                    "0.0.0.0", "0", "Any",  # src
+                    "10.0.0.1", "32", "22",  # dst
                 ]
                 mock_q.confirm.return_value.unsafe_ask.return_value = True
-                result = runner.invoke(app, ["add", "seg-1", "--json"])
-                assert result.exit_code == 0
-                mock_create.assert_called_once()
+                result = runner.invoke(app, ["add", "seg-1"])
+
+    assert result.exit_code == 0, result.output
+    request = mock_create.call_args.args[1]
+    assert request.model_dump() == {
+        "protocol": "TCP",
+        "src_address": "0.0.0.0",
+        "src_mask": "0",
+        "src_port": "Any",
+        "dst_address": "10.0.0.1",
+        "dst_mask": "32",
+        "dst_port": "22",
+        "segment": "seg-1",
+    }
+    assert "ACL作成リクエストを受け付けました" in result.output
 
 
-def test_acl_edit_interactive():
+def test_acl_edit_sends_request_and_reports_acceptance():
+    """選んだACLへ更新リクエストを送り、応答を読まずに受付を表示する"""
     acl = _make_acl()
-    acl_updated = _make_acl(protocol="UDP", dst_port="80")
     with patch("mdx_cli.commands.acl.list_acls", return_value=[acl]):
-        with patch("mdx_cli.commands.acl.update_acl", return_value=acl_updated):
+        with patch("mdx_cli.commands.acl.update_acl") as mock_update:
             with patch("mdx_cli.commands.acl.get_client"):
                 with patch("mdx_cli.commands.acl.resolve_segment_id", return_value="seg-1"):
                     with patch("mdx_cli.commands._common.questionary") as mock_common_q:
@@ -129,13 +169,19 @@ def test_acl_edit_interactive():
                         mock_common_q.text.return_value.unsafe_ask.return_value = "1"
                         with patch("mdx_cli.commands.acl.questionary") as mock_q:
                             mock_q.text.return_value.unsafe_ask.side_effect = [
-                                "0.0.0.0", "0.0.0.0", "Any",  # src
+                                "0.0.0.0", "0", "Any",  # src
                                 "10.0.0.1", "32", "80",  # dst
                             ]
                             mock_q.select.return_value.unsafe_ask.return_value = "UDP"
                             mock_q.confirm.return_value.unsafe_ask.return_value = True
-                            result = runner.invoke(app, ["edit", "--json"])
-                            assert result.exit_code == 0
+                            result = runner.invoke(app, ["edit"])
+
+    assert result.exit_code == 0, result.output
+    acl_id, request = mock_update.call_args.args[1:]
+    assert acl_id == "acl-1"
+    assert request.protocol == "UDP"
+    assert request.dst_port == "80"
+    assert "ACL更新リクエストを受け付けました" in result.output
 
 
 def test_acl_delete():

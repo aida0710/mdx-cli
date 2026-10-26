@@ -31,6 +31,16 @@ def _format_acl(a) -> str:
     )
 
 
+# API はマスクをドット表記ではなくプレフィックス長で受け取る（"255.255.255.255" は 400）
+_MAX_PREFIX_LENGTH = 32
+
+
+def _validate_prefix_length(text: str) -> bool | str:
+    if text.isdigit() and 0 <= int(text) <= _MAX_PREFIX_LENGTH:
+        return True
+    return f"0〜{_MAX_PREFIX_LENGTH}のプレフィックス長で入力してください（例: 32）"
+
+
 def _prompt_acl_fields(selected: ACL | None = None) -> dict:
     """ACLルールの各フィールドを対話入力する（add / edit 共通）。
 
@@ -46,7 +56,9 @@ def _prompt_acl_fields(selected: ACL | None = None) -> dict:
         "送信元アドレス:", default=selected.src_address if selected else "0.0.0.0"
     ).unsafe_ask()
     src_mask = questionary.text(
-        "送信元マスク:", default=selected.src_mask if selected else "0.0.0.0"
+        "送信元マスク（プレフィックス長）:",
+        default=selected.src_mask if selected else "0",
+        validate=_validate_prefix_length,
     ).unsafe_ask()
     src_port = selected.src_port if selected else "Any"
     if protocol != "ICMP":
@@ -57,7 +69,9 @@ def _prompt_acl_fields(selected: ACL | None = None) -> dict:
         "宛先アドレス:", default=selected.dst_address if selected else ""
     ).unsafe_ask()
     dst_mask = questionary.text(
-        "宛先マスク:", default=selected.dst_mask if selected else "255.255.255.255"
+        "宛先マスク（プレフィックス長）:",
+        default=selected.dst_mask if selected else "32",
+        validate=_validate_prefix_length,
     ).unsafe_ask()
     dst_port = selected.dst_port if selected else "Any"
     if protocol != "ICMP":
@@ -100,10 +114,9 @@ def acl_list(
 def acl_add(
     segment_id: str = typer.Argument(None, help="セグメントID（省略時は一覧から選択）"),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
-    json: bool = typer.Option(False, "--json", help="JSON出力"),
 ) -> None:
     """ACLルール追加（対話式）"""
-    client = get_client(silent=json)
+    client = get_client()
     seg_id = resolve_segment_id(client, segment_id, project_id)
 
     console.print("\n[bold]ACLルール追加[/bold]")
@@ -114,8 +127,9 @@ def acl_add(
         raise typer.Abort()
 
     req = ACLCreateRequest(**fields, segment=seg_id)
-    acl = create_acl(client, req)
-    render(acl, ACL_COLUMNS, json_mode=json)
+    create_acl(client, req)
+    stop_active_spinner()
+    console.print("[green]ACL作成リクエストを受け付けました[/green]")
 
 
 @app.command("edit")
@@ -123,10 +137,9 @@ def acl_edit(
     acl_id: str = typer.Argument(None, help="ACL ID（省略時は一覧から選択）"),
     segment_id: str = typer.Option(None, "--segment-id", help="セグメントID（一覧表示用）"),
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
-    json: bool = typer.Option(False, "--json", help="JSON出力"),
 ) -> None:
     """ACLルール編集（対話式）"""
-    client = get_client(silent=json)
+    client = get_client()
 
     # IDから現在値を取得するにはlist経由で探す必要がある
     seg_id = resolve_segment_id(client, segment_id, project_id)
@@ -152,8 +165,9 @@ def acl_edit(
         raise typer.Abort()
 
     req = ACLUpdateRequest(**fields)
-    acl = update_acl(client, acl_id, req)
-    render(acl, ACL_COLUMNS, json_mode=json)
+    update_acl(client, acl_id, req)
+    stop_active_spinner()
+    console.print("[green]ACL更新リクエストを受け付けました[/green]")
 
 
 @app.command("delete")

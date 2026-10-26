@@ -309,17 +309,20 @@ Commands live under `mdx network acl`.
 | Command | Arguments/options | Behavior |
 |---|---|---|
 | `list [segment-id] [-p ID] [--json]` | segment optional | Resolve segment and list ACLs. |
-| `add [segment-id] [-p ID] [--json]` | interactive | Select protocol `TCP`/`UDP`/`ICMP`, source address/mask/port, destination address/mask/port, confirm, create ACL. |
-| `edit [acl-id] [--segment-id ID] [-p ID] [--json]` | interactive | Resolve segment, find ACL, edit current values, confirm, update ACL. |
+| `add [segment-id] [-p ID]` | interactive | Select protocol `TCP`/`UDP`/`ICMP`, source address/mask/port, destination address/mask/port, confirm, send the create request. |
+| `edit [acl-id] [--segment-id ID] [-p ID]` | interactive | Resolve segment, find ACL, edit current values, confirm, send the update request. |
 | `delete [acl-id] [--segment-id ID] [-p ID] [-y]` | interactive unless ID and `-y` | Delete ACL rule. |
 
 Defaults for ACL add:
 
 - Source address: `0.0.0.0`
-- Source mask: `0.0.0.0`
+- Source mask: `0`
 - Source port: `Any` for TCP/UDP; omitted for ICMP
-- Destination mask: `255.255.255.255`
+- Destination mask: `32`
 - Destination port: `Any` for TCP/UDP; omitted for ICMP
+
+Masks are prefix lengths (`0`-`32`); the API rejects dotted masks such as `255.255.255.255` with 400.
+`add` and `edit` print only that the request was accepted. MDX applies the rule asynchronously as a task, so confirm with `mdx network acl list` or `mdx task list`.
 
 ## Templates
 
