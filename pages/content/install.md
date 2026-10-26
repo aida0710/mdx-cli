@@ -59,3 +59,13 @@ uv tool install . --force
 ```bash
 mdx --version
 ```
+
+### シェル補完
+
+Tabキーでサブコマンドやオプションを補完するには、使っているシェルで一度だけ次を実行し、ターミナルを開き直します。
+
+```bash
+mdx --install-completion
+```
+
+bash・zsh・fish・PowerShellに対応しています。補完の候補は毎回 `mdx` 自身が返すため、アップデート後に入れ直す必要はありません。
