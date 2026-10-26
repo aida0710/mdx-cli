@@ -225,8 +225,6 @@ def deploy(
     )
     answers = DeployAnswers()
     steps = build_deploy_steps(options, answers, templates=templates, segments=segments)
-    if steps:
-        console.print("[dim]Esc で前の項目へ戻れます[/dim]")
     run_steps(steps)
 
     def check_and_print_summary() -> None:
@@ -809,7 +807,7 @@ def _load_reconfigure_targets(client, vms_brief: list) -> list:
     console.print(f"  メモリ:   {ref_extra.get('memory', '?')}")
     for d in ref.hard_disks:
         console.print(f"  ディスク: #{d.get('disk_number', '?')}: {d.get('capacity', '?')}")
-    console.print("\n[bold]新しい構成（Enterで変更なし、Esc で前の項目へ戻る）:[/bold]")
+    console.print("\n[bold]新しい構成（Enterで変更なし）:[/bold]")
     return vms_detail
 
 
@@ -863,7 +861,7 @@ def reconfigure(
     project_id: str = typer.Option(None, "--project-id", "-p", help="プロジェクトID", envvar="MDX_PROJECT_ID"),
     no_wait: bool = typer.Option(False, "--no-wait", help="タスク完了を待たない"),
 ) -> None:
-    """VM構成変更（対話式。パック数・ディスクサイズを変更。パターンで複数台対応。Esc で前の項目へ戻る）"""
+    """VM構成変更（対話式。パック数・ディスクサイズを変更。パターンで複数台対応）"""
     pid = resolve_project_id(project_id)
     client = get_client()
 

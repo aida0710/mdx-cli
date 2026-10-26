@@ -123,6 +123,15 @@ def login(
     console.print(f"ログインしました（ユーザー: {username}）")
 
 
+def _delete_totp_secret(store, ask_confirmation: bool) -> None:
+    if ask_confirmation and not questionary.confirm(
+        "削除するとログイン時にOTPの手入力が必要になります。削除しますか？"
+    ).unsafe_ask():
+        raise typer.Abort()
+    store.delete_totp_secret()
+    console.print("TOTPシークレットを削除しました")
+
+
 @app.command()
 def otp(
     delete: bool = typer.Option(False, "--delete", help="登録済みシークレットを削除"),
@@ -148,27 +157,7 @@ def otp(
         return
 
     if delete:
-        action = "delete"
-    elif non_interactive:
-        action = "register"
-    elif entry:
-        action = questionary.select(
-            f"TOTPシークレットは登録済みです（ユーザー: {entry[0]}）",
-            choices=[
-                Choice("登録し直す", value="register"),
-                Choice("削除する（OTPは手入力に戻る）", value="delete"),
-            ],
-        ).unsafe_ask()
-    else:
-        action = "register"
-
-    if action == "delete":
-        if not non_interactive and not questionary.confirm(
-            "削除するとログイン時にOTPの手入力が必要になります。削除しますか？"
-        ).unsafe_ask():
-            raise typer.Abort()
-        store.delete_totp_secret()
-        console.print("TOTPシークレットを削除しました")
+        _delete_totp_secret(store, ask_confirmation=not non_interactive)
         return
 
     if non_interactive:
@@ -183,11 +172,29 @@ def otp(
         except ValueError:
             fail("シークレットが不正です（認証アプリに表示されるBase32文字列を入力してください）")
     else:
-        answers = {"secret": None}
+        answers = {"action": "register", "secret": None}
+
+        def ask_action() -> None:
+            answers["action"] = ask(questionary.select(
+                f"TOTPシークレットは登録済みです（ユーザー: {entry[0]}）",
+                choices=[
+                    Choice("登録し直す", value="register"),
+                    Choice("削除する（OTPは手入力に戻る）", value="delete"),
+                ],
+                default=answers["action"],
+            ))
+
+        def is_registering() -> bool:
+            return answers["action"] == "register"
+
         run_steps([
-            Step("TOTPシークレット", lambda: _ask_totp_secret(username, answers)),
-            Step("確認用のOTP", lambda: _ask_matching_otp(answers)),
+            Step("登録し直すか削除するか", ask_action, is_needed=lambda: entry is not None),
+            Step("TOTPシークレット", lambda: _ask_totp_secret(username, answers), is_needed=is_registering),
+            Step("確認用のOTP", lambda: _ask_matching_otp(answers), is_needed=is_registering),
         ])
+        if answers["action"] == "delete":
+            _delete_totp_secret(store, ask_confirmation=True)
+            return
         secret = answers["secret"]
 
     store.save_totp_secret(username, secret)

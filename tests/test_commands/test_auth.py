@@ -450,3 +450,23 @@ def test_read_non_interactive_secret_rejects_tty():
 
     with pytest.raises(ValueError, match="リダイレクト"):
         _read_non_interactive_secret(TTYInput(TOTP_SECRET))
+
+
+def test_auth_otp_escape_on_secret_goes_back_to_register_or_delete_choice():
+    """登録済みのとき、シークレットで Esc を押すと「登録し直す／削除する」の選択へ戻る"""
+    from mdx_cli.commands._prompt_steps import BACK
+
+    with patch("mdx_cli.commands.auth.get_store") as MockStore:
+        store = MockStore.return_value
+        store.load_credentials.return_value = ("saved_user", "saved_pass")
+        store.load_totp_secret.return_value = ("saved_user", TOTP_SECRET)
+        with patch("mdx_cli.commands.auth.questionary") as mock_q:
+            mock_q.select.return_value.unsafe_ask.side_effect = ["register", "delete"]
+            mock_q.password.return_value.unsafe_ask.return_value = BACK
+            mock_q.confirm.return_value.unsafe_ask.return_value = True
+            result = runner.invoke(app, ["otp"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_q.select.call_args.kwargs["default"] == "register"
+    store.delete_totp_secret.assert_called_once()
+    store.save_totp_secret.assert_not_called()

@@ -122,7 +122,7 @@ def acl_add(
     client = get_client()
     seg_id = resolve_segment_id(client, segment_id, project_id)
 
-    console.print("\n[bold]ACLルール追加[/bold] [dim]（Esc で前の項目へ戻る）[/dim]")
+    console.print("\n[bold]ACLルール追加[/bold]")
     fields = _ask_acl_fields(dict(_NEW_ACL_FIELDS), header="確認:", message="追加しますか？")
 
     req = ACLCreateRequest(**fields, segment=seg_id)
@@ -156,7 +156,7 @@ def acl_edit(
         selected = find_by_uuid(acls, acl_id, label="ACL")
 
     # 現在値を表示して編集
-    console.print("\n[bold]現在の値（Enterでそのまま、Esc で前の項目へ戻る）:[/bold]")
+    console.print("\n[bold]現在の値（Enterでそのまま）:[/bold]")
     current_fields = {key: getattr(selected, key) for key in _NEW_ACL_FIELDS}
     fields = _ask_acl_fields(current_fields, header="変更後:", message="更新しますか？")
 
